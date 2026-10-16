@@ -60,6 +60,8 @@ class OnboardingViewModel: ObservableObject {
 
     private let downloadFluid: (AsrModelVersion, ProgressHandler?) async throws -> AsrModels
 
+    private let ensureDownloadCapacity: () throws -> Void
+
     var supportedLanguages: [String] {
         guard let selectedModelId,
               let model = unifiedModels.first(where: { $0.id == selectedModelId }),
@@ -69,8 +71,11 @@ class OnboardingViewModel: ObservableObject {
 
     init(downloadFluid: @escaping (AsrModelVersion, ProgressHandler?) async throws -> AsrModels = {
         try await AsrModels.downloadAndLoad(version: $0, progressHandler: $1)
+    }, ensureDownloadCapacity: @escaping () throws -> Void = {
+        try DiskSpaceUtil.ensureEnoughFreeSpaceForModelDownload()
     }) {
         self.downloadFluid = downloadFluid
+        self.ensureDownloadCapacity = ensureDownloadCapacity
         let systemLanguage = LanguageUtil.getSystemLanguage()
         AppPreferences.shared.whisperLanguage = systemLanguage
         self.selectedLanguage = systemLanguage
@@ -141,7 +146,7 @@ class OnboardingViewModel: ObservableObject {
     @MainActor
     func downloadModel(_ model: OnboardingUnifiedModel) async throws {
         guard !isDownloading else { return }
-        try DiskSpaceUtil.ensureEnoughFreeSpaceForModelDownload()
+        try ensureDownloadCapacity()
         
         isDownloading = true
         downloadingModelName = model.name

@@ -205,13 +205,18 @@ class SettingsViewModel: ObservableObject {
 
     private let downloadFluid: (AsrModelVersion, ProgressHandler?) async throws -> AsrModels
 
+    private let ensureDownloadCapacity: () throws -> Void
+
     init(downloadWhisper: @escaping (URL, String, @escaping (Double) -> Void) async throws -> Void = {
         try await WhisperModelManager.shared.downloadModel(url: $0, name: $1, progressCallback: $2)
     }, downloadFluid: @escaping (AsrModelVersion, ProgressHandler?) async throws -> AsrModels = {
         try await AsrModels.downloadAndLoad(version: $0, progressHandler: $1)
+    }, ensureDownloadCapacity: @escaping () throws -> Void = {
+        try DiskSpaceUtil.ensureEnoughFreeSpaceForModelDownload()
     }) {
         self.downloadFluid = downloadFluid
         self.downloadWhisper = downloadWhisper
+        self.ensureDownloadCapacity = ensureDownloadCapacity
         let prefs = AppPreferences.shared
         self.selectedEngine = prefs.selectedEngine
         self.fluidAudioModelVersion = prefs.fluidAudioModelVersion
@@ -259,7 +264,7 @@ class SettingsViewModel: ObservableObject {
     @MainActor
     func downloadPhononModel() async throws {
         guard !isDownloading else { return }
-        try DiskSpaceUtil.ensureEnoughFreeSpaceForModelDownload()
+        try ensureDownloadCapacity()
         isDownloading = true
         downloadingModelName = "Phonon-2"
         downloadProgress = 0
@@ -343,7 +348,7 @@ class SettingsViewModel: ObservableObject {
     @MainActor
     func downloadModel(_ model: SettingsDownloadableModel) async throws {
         guard !isDownloading else { return }
-        try DiskSpaceUtil.ensureEnoughFreeSpaceForModelDownload()
+        try ensureDownloadCapacity()
         
         isDownloading = true
         downloadingModelName = model.name
@@ -452,7 +457,7 @@ class SettingsViewModel: ObservableObject {
     @MainActor
     func downloadFluidAudioModel(_ model: SettingsFluidAudioModel) async throws {
         guard !isDownloading else { return }
-        try DiskSpaceUtil.ensureEnoughFreeSpaceForModelDownload()
+        try ensureDownloadCapacity()
         
         isDownloading = true
         downloadingModelName = model.name

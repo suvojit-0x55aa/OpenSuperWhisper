@@ -154,10 +154,15 @@ final class PhononIntegrationTests: XCTestCase {
 
         let maximumSamples = Windower.maximumWindowSamples(forFunctionSeconds: 15)
         XCTAssertEqual(maximumSamples, 239_600)
-        XCTAssertEqual(
-            Windower.plan([Float](repeating: 0, count: maximumSamples), singleShotMaxS: capacity),
-            [Window(start: 0, end: maximumSamples, overlapFromPrevious: false, splitSample: nil)]
+        let singleWindow = Windower.plan(
+            [Float](repeating: 0, count: maximumSamples),
+            singleShotMaxS: capacity
         )
+        XCTAssertEqual(singleWindow.count, 1)
+        XCTAssertEqual(singleWindow.first?.start, 0)
+        XCTAssertEqual(singleWindow.first?.end, maximumSamples)
+        XCTAssertEqual(singleWindow.first?.overlapFromPrevious, false)
+        XCTAssertNil(singleWindow.first?.splitSample)
 
         for sampleCount in [maximumSamples + 1, 240_000] {
             let windows = Windower.plan(
@@ -348,7 +353,8 @@ final class PhononIntegrationTests: XCTestCase {
         )
 
         XCTAssertTrue(relaunched.isModelInstalled)
-        XCTAssertEqual(try await relaunched.verifyInstalledModel(), relaunched.modelDirectory)
+        let verifiedModelDirectory = try await relaunched.verifyInstalledModel()
+        XCTAssertEqual(verifiedModelDirectory, relaunched.modelDirectory)
         XCTAssertFalse(FileManager.default.fileExists(atPath: staging.path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: relaunched.activationJournalURL.path))
     }
