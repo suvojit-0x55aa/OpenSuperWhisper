@@ -413,7 +413,6 @@ final class PhononEngine: PCMTranscriptionEngine, ProgressReportingTranscription
 
     private let modelManager: PhononModelManager
     private let client: PhononTranscribing
-    private var modelDirectory: URL?
 
     init(
         modelManager: PhononModelManager = .shared,
@@ -426,7 +425,6 @@ final class PhononEngine: PCMTranscriptionEngine, ProgressReportingTranscription
     func initialize() async throws {
         guard PhononPlatform.isSupported else { throw PhononModelError.unsupportedPlatform }
         let directory = try await modelManager.verifyInstalledModel()
-        modelDirectory = directory
         try await prepareClient(in: directory)
     }
 
@@ -439,13 +437,7 @@ final class PhononEngine: PCMTranscriptionEngine, ProgressReportingTranscription
 
     private func ensurePrepared() async throws {
         if client.isPrepared { return }
-        let directory: URL
-        if let modelDirectory {
-            directory = modelDirectory
-        } else {
-            directory = try await modelManager.verifyInstalledModel()
-            modelDirectory = directory
-        }
+        let directory = try await modelManager.verifyInstalledModel()
         try await prepareClient(in: directory)
     }
 

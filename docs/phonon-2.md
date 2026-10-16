@@ -64,7 +64,8 @@ state; the check is cached and does not add a CoreAudio round-trip.
 ## M5 local benchmark
 
 Measured on an Apple M5 MacBook Pro with 16 GB RAM and macOS 26.2. All engines
-used the same 5.000-second English PCM clip and 97.106-second English fixture.
+used the same approximately five-second English PCM clip (4.9905625 seconds)
+and 97.106-second English fixture.
 Phonon ran through the real app selection, direct-PCM, embedded XPC, and URL
 paths. The current Whisper fast tier on this installation was
 `ggml-large-v3-turbo.bin`. Times are wall-clock seconds. Peak memory is the Mach

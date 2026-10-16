@@ -6,6 +6,20 @@ import XCTest
 
 @MainActor
 final class PhononBenchmarkTests: XCTestCase {
+    private struct BenchmarkMachine {
+        let processor: String
+        let memoryBytes: UInt64
+
+        var reportName: String {
+            let memoryGiB = memoryBytes / 1_073_741_824
+            return "\(processor), \(memoryGiB) GB"
+        }
+
+        var isSupported: Bool {
+            processor == "Apple M5" && memoryBytes == 16 * 1_073_741_824
+        }
+    }
+
     private enum Engine: String, CaseIterable {
         case phonon
         case parakeet
@@ -36,7 +50,10 @@ final class PhononBenchmarkTests: XCTestCase {
         XCTAssertTrue(fileManager.fileExists(atPath: longURL.path))
         XCTAssertTrue(fileManager.fileExists(atPath: whisperPath.path))
 
+        let machine = try Self.benchmarkMachine()
+        try XCTSkipUnless(machine.isSupported, "M5 evidence requires Apple M5 with 16 GB; found \(machine.reportName)")
         let shortSamples = try Self.loadMonoPCM(url: shortURL)
+        let longClipSeconds = try Self.audioDuration(url: longURL)
         let modelManager = PhononModelManager.shared
         let downloadStarted = Date()
         if !modelManager.isModelInstalled {
@@ -61,9 +78,9 @@ final class PhononBenchmarkTests: XCTestCase {
         }
 
         var report: [String: Any] = [
-            "machine": "Apple M5, 16 GB",
+            "machine": machine.reportName,
             "short_clip_seconds": Double(shortSamples.count) / 16_000,
-            "long_clip_seconds": 97.106,
+            "long_clip_seconds": longClipSeconds,
             "phonon_download_seconds_this_run": downloadSeconds,
             "phonon_pinned_download_bytes": modelManager.release.downloadSize,
             "phonon_on_disk_bytes_including_compiled_cache": modelManager.storageBytes(),
@@ -315,6 +332,36 @@ final class PhononBenchmarkTests: XCTestCase {
         try file.read(into: buffer)
         let channel = try XCTUnwrap(buffer.floatChannelData?[0])
         return Array(UnsafeBufferPointer(start: channel, count: Int(buffer.frameLength)))
+    }
+
+    private static func audioDuration(url: URL) throws -> Double {
+        let file = try AVAudioFile(forReading: url)
+        return Double(file.length) / file.processingFormat.sampleRate
+    }
+
+    private static func benchmarkMachine() throws -> BenchmarkMachine {
+        let process = Process()
+        let output = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/sbin/sysctl")
+        process.arguments = ["-n", "machdep.cpu.brand_string"]
+        process.standardOutput = output
+        process.standardError = output
+        try process.run()
+        process.waitUntilExit()
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        let processor = String(decoding: data, as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard process.terminationStatus == 0, !processor.isEmpty else {
+            throw NSError(
+                domain: "PhononBenchmarkTests",
+                code: Int(process.terminationStatus),
+                userInfo: [NSLocalizedDescriptionKey: "Unable to read the benchmark processor: \(processor)"]
+            )
+        }
+        return BenchmarkMachine(
+            processor: processor,
+            memoryBytes: ProcessInfo.processInfo.physicalMemory
+        )
     }
 
     private static func peakResidentMemoryBytes() -> UInt64? {

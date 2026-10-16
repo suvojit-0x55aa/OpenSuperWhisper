@@ -480,6 +480,22 @@ final class PhononIntegrationTests: XCTestCase {
         XCTAssertEqual(retriedText, "direct pcm")
         XCTAssertEqual(client.prepareCalls, 2)
         XCTAssertEqual(client.sampleCalls, 3)
+
+        try Data("corrupt".utf8).write(
+            to: fixture.manager.modelDirectory.appendingPathComponent("manifest.json")
+        )
+        client.simulateInvalidation()
+        do {
+            _ = try await engine.transcribeSamples([0.25], settings: settings)
+            XCTFail("Expected invalidated connection recovery to reverify the model")
+        } catch let error as PhononModelError {
+            guard case .invalidSize(let path, _, _) = error else {
+                return XCTFail("Unexpected verification error: \(error)")
+            }
+            XCTAssertEqual(path, "manifest.json")
+        }
+        XCTAssertEqual(client.prepareCalls, 2)
+        XCTAssertEqual(client.sampleCalls, 3)
     }
 
     func testStorageAccountingAndDeleteIncludeCompiledCache() throws {
