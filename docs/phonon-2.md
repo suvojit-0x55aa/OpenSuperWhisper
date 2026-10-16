@@ -16,6 +16,16 @@ for its pinned length and SHA-256 before the version directory is activated.
 The exact file manifest is in `THIRD_PARTY_NOTICES.md`; required attribution and
 NOTICE text are also copied into the app as `Phonon2-NOTICE.txt`.
 
+Downloads use one manager-owned working directory and are fully validated before
+activation. Activation first writes a journal and, for reinstalls, preserves the
+previously valid model as a backup. On relaunch, recovery either completes a
+validated first install, accepts a validated active model, or restores the
+recorded valid backup. Recovery uses only paths owned by a valid journal;
+corrupt or ambiguous activation state fails closed instead of guessing among
+active or backup candidates. The exact journal-free download workspace is the
+only orphan removed automatically; it is also included in storage accounting
+and model deletion.
+
 The Swift runtime sources and universal macOS decoder archive are vendored at
 the exact 1.1.2 release because Xcode cannot build the upstream binary target
 alongside FluidAudio: both binary XCFrameworks emit the same generic
@@ -47,6 +57,13 @@ and temporarily falls back to the configured local Whisper model without
 changing the saved Phonon selection. Deleting Phonon removes both the downloaded
 version directory and the runtime's content-addressed compiled cache.
 
+Cancellation waits for the native Phonon call to acknowledge the request before
+new work uses that engine, while a successful cancellation keeps the prepared
+XPC connection warm. Replacement-load serialization applies only to cancelled
+native Phonon initialization; Whisper loads, Parakeet loads, and the Whisper
+fallback keep their existing behavior. After an XPC invalidation, reconnection
+revalidates every pinned model file before preparing the replacement helper.
+
 ## Reproduced pre-change defects
 
 | Trigger | Masking condition | Visible symptom |
@@ -77,8 +94,8 @@ fresh app hosts, so no earlier engine can contaminate a lifetime high-water mark
 | Measurement | Phonon-2 | Parakeet v3 | Whisper large-v3-turbo |
 | --- | ---: | ---: | ---: |
 | Fresh-process model preparation/load | 100.98 | 27.07 | 12.48 |
-| First 5 s dictation after ready | 0.189 | — | — |
-| Warm 5 s dictation | 0.156 | 0.153 | 1.520 |
+| First ~5 s dictation after ready | 0.189 | — | — |
+| Warm ~5 s dictation | 0.156 | 0.153 | 1.520 |
 | 97.106 s clip | 3.083 wall / 3.051 decode | 1.004 | 11.598 |
 | Peak physical footprint | 134.9 MiB | 95.5 MiB | 1,922.1 MiB |
 
@@ -125,6 +142,8 @@ xcodebuild test \
   -only-testing:OpenSuperWhisperTests/PhononBenchmarkTests/testM5LocalEngineComparisonAndPhononAppPath
 ```
 
-The coordinator launches one fresh test process per engine and writes the raw
-report to `/tmp/osw-phonon-benchmark.json`. It does not copy or replace
+The coordinator verifies that the host is an Apple M5 Mac with 16 GB RAM, reads
+both fixture durations at runtime, launches one fresh test process per engine,
+and writes the raw report to `/tmp/osw-phonon-benchmark.json`. It skips without
+emitting evidence on another host and does not copy or replace
 `/Applications/OpenSuperWhisper.app`.
