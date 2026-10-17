@@ -220,7 +220,7 @@ class ModifierKeyMonitor {
         failure?()
         stop()
     }
-    
+
     func handleFlagsChanged(event: CGEvent) {
         let keyCode = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
         let flags = event.flags
