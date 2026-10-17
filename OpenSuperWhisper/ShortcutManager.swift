@@ -12,6 +12,12 @@ extension KeyboardShortcuts.Name {
     static let escape = Self("escape", initial: .init(.escape))
 }
 
+enum RecordingTrigger: Equatable {
+    case keyCombination
+    case modifier(ModifierKey)
+    case mouseButton(MouseButton)
+}
+
 @MainActor
 class ShortcutManager {
     static let shared = ShortcutManager()
@@ -22,20 +28,18 @@ class ShortcutManager {
     private var holdWorkItem: DispatchWorkItem?
     private let holdThreshold: TimeInterval = 0.3
     private var holdMode = false
-    private var useModifierOnlyHotkey = false
-    private var useMouseButtonHotkey = false
 
     init(registerShortcuts: Bool = true) {
         guard registerShortcuts else { return }
         print("ShortcutManager init")
 
+        let permissions = PermissionsManager.shared
+        triggerPermissions = permissions
         setupKeyboardShortcuts()
         setupRecordingTrigger()
-        let permissions = PermissionsManager()
-        triggerPermissions = permissions
         observeTriggerPermissions(permissions.$isAccessibilityPermissionGranted
-            .combineLatest(permissions.$isInputMonitoringPermissionGranted)
-            .map { ($0 ? 1 : 0) | ($1 ? 2 : 0) }
+            .combineLatest(permissions.$inputMonitoringPermissionState)
+            .map { ($0 ? 1 : 0) | ($1 == .granted ? 2 : 0) }
             .eraseToAnyPublisher()) { [weak self] in self?.setupRecordingTrigger() }
         
         NotificationCenter.default.addObserver(
@@ -95,16 +99,19 @@ class ShortcutManager {
     private func setupRecordingTrigger() {
         let modifierKey = ModifierKey(rawValue: AppPreferences.shared.modifierOnlyHotkey) ?? .none
         let mouseButton = MouseButton(rawValue: AppPreferences.shared.mouseButtonHotkey) ?? .none
+        let permissions = triggerPermissions ?? PermissionsManager.shared
+        let trigger = Self.resolveRecordingTrigger(
+            modifierKey: modifierKey,
+            mouseButton: mouseButton,
+            accessibilityGranted: permissions.isAccessibilityPermissionGranted,
+            inputMonitoringState: permissions.inputMonitoringPermissionState
+        )
 
-        // The three trigger modes are mutually exclusive. Tear all of them down
-        // first, then enable exactly one. A configured mouse button takes priority
-        // over a modifier key, which takes priority over the regular shortcut.
         ModifierKeyMonitor.shared.stop()
         MouseButtonMonitor.shared.stop()
 
-        if mouseButton != .none {
-            useMouseButtonHotkey = true
-            useModifierOnlyHotkey = false
+        switch trigger {
+        case .mouseButton(let button):
             KeyboardShortcuts.disable(.toggleRecord)
 
             MouseButtonMonitor.shared.onButtonDown = { [weak self] in
@@ -115,11 +122,9 @@ class ShortcutManager {
                 self?.handleKeyUp()
             }
 
-            MouseButtonMonitor.shared.start(mouseButton: mouseButton)
-            print("ShortcutManager: Using mouse-button hotkey: \(mouseButton.displayName)")
-        } else if modifierKey != .none {
-            useMouseButtonHotkey = false
-            useModifierOnlyHotkey = true
+            MouseButtonMonitor.shared.start(mouseButton: button)
+            print("ShortcutManager: Using mouse-button hotkey: \(button.displayName)")
+        case .modifier(let modifier):
             KeyboardShortcuts.disable(.toggleRecord)
 
             ModifierKeyMonitor.shared.onKeyDown = { [weak self] in
@@ -130,14 +135,29 @@ class ShortcutManager {
                 self?.handleKeyUp()
             }
 
-            ModifierKeyMonitor.shared.start(modifierKey: modifierKey)
-            print("ShortcutManager: Using modifier-only hotkey: \(modifierKey.displayName)")
-        } else {
-            useMouseButtonHotkey = false
-            useModifierOnlyHotkey = false
+            ModifierKeyMonitor.shared.start(modifierKey: modifier)
+            print("ShortcutManager: Using modifier-only hotkey: \(modifier.displayName)")
+        case .keyCombination:
             KeyboardShortcuts.enable(.toggleRecord)
             print("ShortcutManager: Using regular keyboard shortcut")
         }
+    }
+
+    static func resolveRecordingTrigger(
+        modifierKey: ModifierKey,
+        mouseButton: MouseButton,
+        accessibilityGranted: Bool,
+        inputMonitoringState: InputMonitoringPermissionState
+    ) -> RecordingTrigger {
+        if mouseButton != .none, accessibilityGranted {
+            return .mouseButton(mouseButton)
+        }
+        if mouseButton == .none,
+           modifierKey != .none,
+           inputMonitoringState == .granted {
+            return .modifier(modifierKey)
+        }
+        return .keyCombination
     }
     
     private func handleKeyDown() {

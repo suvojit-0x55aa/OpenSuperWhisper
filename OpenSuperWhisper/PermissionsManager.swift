@@ -7,31 +7,115 @@ enum Permission {
     case microphone
     case accessibility
     case inputMonitoring
+
+    var systemSettingsURL: URL {
+        let anchor: String
+        switch self {
+        case .microphone:
+            anchor = "Privacy_Microphone"
+        case .accessibility:
+            anchor = "Privacy_Accessibility"
+        case .inputMonitoring:
+            anchor = "Privacy_ListenEvent"
+        }
+        return URL(string: "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?\(anchor)")!
+    }
+}
+
+enum InputMonitoringDecision: Equatable {
+    case notDetermined
+    case denied
+    case granted
+}
+
+enum InputMonitoringPermissionState: Equatable {
+    case notDetermined
+    case denied
+    case restartRequired
+    case granted
+
+    static func resolve(preflightGranted: Bool, decision: InputMonitoringDecision) -> Self {
+        if preflightGranted {
+            return .granted
+        }
+        switch decision {
+        case .notDetermined:
+            return .notDetermined
+        case .denied:
+            return .denied
+        case .granted:
+            // TCC has recorded the grant, but this process does not have it yet.
+            return .restartRequired
+        }
+    }
+}
+
+struct PermissionClient {
+    var microphoneAuthorizationStatus: () -> AVAuthorizationStatus
+    var requestMicrophoneAccess: (@escaping (Bool) -> Void) -> Void
+    var isAccessibilityTrusted: () -> Bool
+    var inputMonitoringDecision: () -> InputMonitoringDecision
+    var preflightInputMonitoringAccess: () -> Bool
+    var requestInputMonitoringAccess: () -> Bool
+    var openSystemSettings: (URL) -> Void
+
+    static let live = PermissionClient(
+        microphoneAuthorizationStatus: { AVCaptureDevice.authorizationStatus(for: .audio) },
+        requestMicrophoneAccess: { completion in
+            AVCaptureDevice.requestAccess(for: .audio, completionHandler: completion)
+        },
+        isAccessibilityTrusted: { AXIsProcessTrusted() },
+        inputMonitoringDecision: {
+            switch IOHIDCheckAccess(kIOHIDRequestTypeListenEvent) {
+            case kIOHIDAccessTypeGranted:
+                return .granted
+            case kIOHIDAccessTypeDenied:
+                return .denied
+            default:
+                return .notDetermined
+            }
+        },
+        // The modifier trigger is a listen-only CGEvent tap, so use the
+        // matching Core Graphics preflight/request pair rather than AX trust.
+        preflightInputMonitoringAccess: { CGPreflightListenEventAccess() },
+        requestInputMonitoringAccess: { CGRequestListenEventAccess() },
+        openSystemSettings: { url in _ = NSWorkspace.shared.open(url) }
+    )
 }
 
 class PermissionsManager: ObservableObject {
-    @Published var isMicrophonePermissionGranted = false
-    @Published var isAccessibilityPermissionGranted = false
-    @Published var isInputMonitoringPermissionGranted = false
-    /// False until the first async TCC check completes; the UI must not show
-    /// "permission missing" warnings while the actual status is still unknown,
-    /// otherwise they flash on every settings screen open.
+    static let shared = PermissionsManager()
+
+    @Published private(set) var isMicrophonePermissionGranted = false
+    @Published private(set) var isAccessibilityPermissionGranted = false
+    @Published private(set) var inputMonitoringPermissionState: InputMonitoringPermissionState = .notDetermined
     @Published private(set) var hasCompletedInitialCheck = false
 
-    // TCC status queries (AVCaptureDevice.authorizationStatus, IOHIDCheckAccess)
-    // are synchronous XPC round-trips to tccd taking 40-100 ms — they must
-    // never run on the main thread (traces showed them dropping animation
-    // frames every second while the polling timer was active).
-    private let checkQueue = DispatchQueue(label: "com.opensuperwhisper.permissions", qos: .utility)
-    private var isCheckInFlight = false
+    var isInputMonitoringPermissionGranted: Bool {
+        inputMonitoringPermissionState == .granted
+    }
 
+    private let client: PermissionClient
+    private let checkQueue: DispatchQueue
+    private var isCheckInFlight = false
+    private var isInputMonitoringRequestInFlight = false
+    private var hasRequestedInputMonitoring = false
     private var permissionCheckTimer: Timer?
     private var windowObservers: [NSObjectProtocol] = []
-    /// Polling is paused for the whole indicator session (prepare → hidden):
-    /// every millisecond of the main runloop there belongs to the animation.
     private var isIndicatorSessionActive = false
 
-    init() {
+    init(
+        client: PermissionClient = .live,
+        monitorSystemChanges: Bool = true,
+        checkQueue: DispatchQueue = DispatchQueue(
+            label: "com.opensuperwhisper.permissions",
+            qos: .utility
+        )
+    ) {
+        self.client = client
+        self.checkQueue = checkQueue
+
+        guard monitorSystemChanges else { return }
         checkAllPermissions()
 
         NSWorkspace.shared.notificationCenter.addObserver(
@@ -40,7 +124,6 @@ class PermissionsManager: ObservableObject {
             name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification,
             object: nil
         )
-
         setupWindowObservers()
     }
 
@@ -60,7 +143,6 @@ class PermissionsManager: ObservableObject {
         ) { [weak self] _ in
             self?.startPermissionChecking()
         }
-
         let closeObserver = NotificationCenter.default.addObserver(
             forName: NSWindow.willCloseNotification,
             object: nil,
@@ -68,7 +150,6 @@ class PermissionsManager: ObservableObject {
         ) { [weak self] _ in
             self?.stopPermissionChecking()
         }
-
         let hideObserver = NotificationCenter.default.addObserver(
             forName: NSWindow.didResignKeyNotification,
             object: nil,
@@ -76,7 +157,6 @@ class PermissionsManager: ObservableObject {
         ) { [weak self] _ in
             self?.stopPermissionChecking()
         }
-
         let indicatorShowObserver = NotificationCenter.default.addObserver(
             forName: .indicatorWindowWillShow,
             object: nil,
@@ -84,7 +164,6 @@ class PermissionsManager: ObservableObject {
         ) { [weak self] _ in
             self?.isIndicatorSessionActive = true
         }
-
         let indicatorHideObserver = NotificationCenter.default.addObserver(
             forName: .indicatorWindowDidHide,
             object: nil,
@@ -93,8 +172,13 @@ class PermissionsManager: ObservableObject {
             self?.isIndicatorSessionActive = false
         }
 
-        windowObservers = [showObserver, closeObserver, hideObserver,
-                           indicatorShowObserver, indicatorHideObserver]
+        windowObservers = [
+            showObserver,
+            closeObserver,
+            hideObserver,
+            indicatorShowObserver,
+            indicatorHideObserver
+        ]
 
         if let window = NSApplication.shared.mainWindow, window.isKeyWindow {
             startPermissionChecking()
@@ -104,7 +188,7 @@ class PermissionsManager: ObservableObject {
     private func startPermissionChecking() {
         guard permissionCheckTimer == nil else { return }
         permissionCheckTimer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            guard let self = self, !self.isIndicatorSessionActive else { return }
+            guard let self, !self.isIndicatorSessionActive else { return }
             self.checkAllPermissions()
         }
     }
@@ -114,21 +198,21 @@ class PermissionsManager: ObservableObject {
         permissionCheckTimer = nil
     }
 
-    private func checkAllPermissions() {
+    func checkAllPermissions() {
         guard !isCheckInFlight else { return }
         isCheckInFlight = true
 
         checkQueue.async { [weak self] in
-            let microphone = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
-            let accessibility = AXIsProcessTrusted()
-            let inputMonitoring = IOHIDCheckAccess(kIOHIDRequestTypeListenEvent) == kIOHIDAccessTypeGranted
+            guard let self else { return }
+            let microphone = self.client.microphoneAuthorizationStatus() == .authorized
+            let accessibility = self.client.isAccessibilityTrusted()
+            let inputMonitoring = self.currentInputMonitoringState()
 
             DispatchQueue.main.async {
-                guard let self = self else { return }
                 self.isCheckInFlight = false
                 self.isMicrophonePermissionGranted = microphone
                 self.isAccessibilityPermissionGranted = accessibility
-                self.isInputMonitoringPermissionGranted = inputMonitoring
+                self.inputMonitoringPermissionState = self.mergedInputMonitoringState(inputMonitoring)
                 self.hasCompletedInitialCheck = true
             }
         }
@@ -136,68 +220,133 @@ class PermissionsManager: ObservableObject {
 
     func checkMicrophonePermission() {
         checkQueue.async { [weak self] in
-            let granted = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
+            guard let self else { return }
+            let granted = self.client.microphoneAuthorizationStatus() == .authorized
             DispatchQueue.main.async {
-                self?.isMicrophonePermissionGranted = granted
+                self.isMicrophonePermissionGranted = granted
             }
         }
     }
 
     func checkAccessibilityPermission() {
         checkQueue.async { [weak self] in
-            let granted = AXIsProcessTrusted()
+            guard let self else { return }
+            let granted = self.client.isAccessibilityTrusted()
             DispatchQueue.main.async {
-                self?.isAccessibilityPermissionGranted = granted
+                self.isAccessibilityPermissionGranted = granted
             }
         }
     }
 
     func checkInputMonitoringPermission() {
         checkQueue.async { [weak self] in
-            let granted = IOHIDCheckAccess(kIOHIDRequestTypeListenEvent) == kIOHIDAccessTypeGranted
+            guard let self else { return }
+            let state = self.currentInputMonitoringState()
             DispatchQueue.main.async {
-                self?.isInputMonitoringPermissionGranted = granted
+                self.inputMonitoringPermissionState = self.mergedInputMonitoringState(state)
             }
         }
     }
 
+    /// Called only when the user enables the single-modifier trigger.
+    /// Previously denied requests remain denied until the explicit recovery action.
+    func requestInputMonitoringPermissionIfNeeded() {
+        requestInputMonitoring(openSettingsWhenUnavailable: false)
+    }
+
+    func requestInputMonitoringPermissionOrOpenSystemPreferences() {
+        requestInputMonitoring(openSettingsWhenUnavailable: true)
+    }
+
+    func openInputMonitoringSystemPreferences() {
+        openSystemPreferences(for: .inputMonitoring)
+    }
+
+    private func requestInputMonitoring(openSettingsWhenUnavailable: Bool) {
+        switch inputMonitoringPermissionState {
+        case .granted:
+            return
+        case .denied, .restartRequired:
+            if openSettingsWhenUnavailable {
+                openSystemPreferences(for: .inputMonitoring)
+            }
+            return
+        case .notDetermined:
+            break
+        }
+
+        guard !isInputMonitoringRequestInFlight, !hasRequestedInputMonitoring else { return }
+        isInputMonitoringRequestInFlight = true
+
+        checkQueue.async { [weak self] in
+            guard let self else { return }
+            let currentState = self.currentInputMonitoringState()
+
+            guard currentState == .notDetermined else {
+                DispatchQueue.main.async {
+                    self.isInputMonitoringRequestInFlight = false
+                    self.inputMonitoringPermissionState = currentState
+                    if openSettingsWhenUnavailable,
+                       currentState == .denied || currentState == .restartRequired {
+                        self.openSystemPreferences(for: .inputMonitoring)
+                    }
+                }
+                return
+            }
+
+            let requestGranted = self.client.requestInputMonitoringAccess()
+            let stateAfterRequest = self.currentInputMonitoringState()
+
+            DispatchQueue.main.async {
+                self.isInputMonitoringRequestInFlight = false
+                self.hasRequestedInputMonitoring = true
+                if requestGranted {
+                    self.inputMonitoringPermissionState = stateAfterRequest == .granted
+                        ? .granted
+                        : .restartRequired
+                } else {
+                    self.inputMonitoringPermissionState = stateAfterRequest == .notDetermined
+                        ? .denied
+                        : stateAfterRequest
+                }
+            }
+        }
+    }
+
+    private func currentInputMonitoringState() -> InputMonitoringPermissionState {
+        InputMonitoringPermissionState.resolve(
+            preflightGranted: client.preflightInputMonitoringAccess(),
+            decision: client.inputMonitoringDecision()
+        )
+    }
+
+    private func mergedInputMonitoringState(
+        _ detectedState: InputMonitoringPermissionState
+    ) -> InputMonitoringPermissionState {
+        guard detectedState == .notDetermined, hasRequestedInputMonitoring else {
+            return detectedState
+        }
+        return inputMonitoringPermissionState == .restartRequired ? .restartRequired : .denied
+    }
+
     func requestAccessibilityPermissionOrOpenSystemPreferences() {
-        if AXIsProcessTrusted() {
+        if client.isAccessibilityTrusted() {
             isAccessibilityPermissionGranted = true
         } else {
             openSystemPreferences(for: .accessibility)
         }
     }
 
-    /// Shows the system Input Monitoring prompt if it hasn't been decided yet,
-    /// otherwise opens System Settings so the user can grant it manually.
-    func requestInputMonitoringPermissionOrOpenSystemPreferences() {
-        switch IOHIDCheckAccess(kIOHIDRequestTypeListenEvent) {
-        case kIOHIDAccessTypeGranted:
-            isInputMonitoringPermissionGranted = true
-        case kIOHIDAccessTypeUnknown:
-            let granted = IOHIDRequestAccess(kIOHIDRequestTypeListenEvent)
-            DispatchQueue.main.async { [weak self] in
-                self?.isInputMonitoringPermissionGranted = granted
-            }
-        default:
-            openSystemPreferences(for: .inputMonitoring)
-        }
-    }
-
     func requestMicrophonePermissionOrOpenSystemPreferences() {
-
-        let status = AVCaptureDevice.authorizationStatus(for: .audio)
-
-        switch status {
+        switch client.microphoneAuthorizationStatus() {
         case .notDetermined:
-            AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
+            client.requestMicrophoneAccess { [weak self] granted in
                 DispatchQueue.main.async {
                     self?.isMicrophonePermissionGranted = granted
                 }
             }
         case .authorized:
-            self.isMicrophonePermissionGranted = true
+            isMicrophonePermissionGranted = true
         default:
             openSystemPreferences(for: .microphone)
         }
@@ -208,22 +357,9 @@ class PermissionsManager: ObservableObject {
     }
 
     func openSystemPreferences(for permission: Permission) {
-        let urlString: String
-        switch permission {
-        case .microphone:
-            urlString = "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"
-        case .accessibility:
-            urlString =
-                "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
-        case .inputMonitoring:
-            urlString =
-                "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent"
-        }
-
-        if let url = URL(string: urlString) {
-            DispatchQueue.main.async {
-                NSWorkspace.shared.open(url)
-            }
+        let url = permission.systemSettingsURL
+        DispatchQueue.main.async { [client] in
+            client.openSystemSettings(url)
         }
     }
 }

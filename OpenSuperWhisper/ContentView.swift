@@ -309,7 +309,7 @@ class ContentViewModel: ObservableObject {
 struct ContentView: View {
     @ObservedObject private var errors = AppErrorCenter.shared
     @StateObject private var viewModel = ContentViewModel()
-    @StateObject private var permissionsManager = PermissionsManager()
+    @ObservedObject private var permissionsManager = PermissionsManager.shared
     @Environment(\.colorScheme) private var colorScheme
     @State private var isSettingsPresented = false
     @State private var searchText = ""
@@ -721,7 +721,7 @@ struct PermissionsView: View {
             PermissionRow(
                 isGranted: permissionsManager.isAccessibilityPermissionGranted,
                 title: "Accessibility Access",
-                description: "Required for global keyboard shortcuts",
+                description: "Used for automatic paste, indicator placement, and mouse-button triggers",
                 action: { permissionsManager.openSystemPreferences(for: .accessibility) }
             )
 

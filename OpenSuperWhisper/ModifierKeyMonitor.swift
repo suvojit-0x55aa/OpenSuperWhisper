@@ -158,7 +158,7 @@ class ModifierKeyMonitor {
             },
             userInfo: Unmanaged.passUnretained(self).toOpaque()
         ) else {
-            print("ModifierKeyMonitor: Failed to create event tap. Check accessibility permissions.")
+            print("ModifierKeyMonitor: Failed to create event tap. Check Input Monitoring permission.")
             return
         }
         

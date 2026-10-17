@@ -31,6 +31,14 @@ Or from [GitHub releases page](https://github.com/Starmel/OpenSuperWhisper/relea
 
 - macOS 14 or later (Apple Silicon/ARM64); Phonon-2 requires macOS 15 or later
 
+### macOS permissions
+
+- **Microphone** authorizes recording new audio and remains separate from the other permissions.
+- **Accessibility** remains independent. OpenSuperWhisper uses it for automatic paste, indicator placement and the optional mouse-button trigger.
+- **Input Monitoring** is optional and is requested only when you choose the single modifier key trigger. The regular key-combination shortcut and in-app recording remain available without it. A grant made in System Settings may require you to quit and reopen OpenSuperWhisper before the modifier trigger becomes active.
+
+The modifier trigger uses Apple's [`CGPreflightListenEventAccess`](https://developer.apple.com/documentation/coregraphics/cgpreflightlisteneventaccess()) and [`CGRequestListenEventAccess`](https://developer.apple.com/documentation/coregraphics/cgrequestlisteneventaccess()) APIs. Permission decisions belong to the app's macOS code identity. Release updates must keep the `ru.starmel.OpenSuperWhisper` bundle identifier and trusted signing identity stable; unsigned or differently signed development builds should not be used to infer release permission state. The app does not reset or bypass TCC.
+
 ## Support
 
 If you encounter any issues or have questions, please:

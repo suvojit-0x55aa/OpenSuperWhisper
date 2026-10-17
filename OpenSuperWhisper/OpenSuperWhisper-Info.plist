@@ -22,7 +22,7 @@
 	<key>NSMicrophoneUsageDescription</key>
 	<string>OpenSuperWhisper needs microphone access to record audio for transcription.</string>
 	<key>NSAccessibilityUsageDescription</key>
-	<string>OpenSuperWhisper needs accessibility access to provide system-wide functionality.</string>
+	<string>OpenSuperWhisper uses Accessibility for automatic paste, indicator placement, and the optional mouse-button recording trigger.</string>
 	<key>NSAppleEventsUsageDescription</key>
 	<string>OpenSuperWhisper needs accessibility access to provide system-wide functionality.</string>
 </dict>
