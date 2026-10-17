@@ -51,7 +51,8 @@ final class TriggerPermissionTests: XCTestCase {
                 modifierKey: .rightOption,
                 mouseButton: .none,
                 accessibilityGranted: false,
-                inputMonitoringState: manager.inputMonitoringPermissionState
+                inputMonitoringState: manager.inputMonitoringPermissionState,
+                keyCombinationAssigned: true
             ),
             .keyCombination
         )
@@ -167,7 +168,8 @@ final class TriggerPermissionTests: XCTestCase {
                 modifierKey: .rightOption,
                 mouseButton: .none,
                 accessibilityGranted: false,
-                inputMonitoringState: .granted
+                inputMonitoringState: .granted,
+                keyCombinationAssigned: true
             ),
             .modifier(.rightOption)
         )
@@ -176,7 +178,8 @@ final class TriggerPermissionTests: XCTestCase {
                 modifierKey: .rightOption,
                 mouseButton: .none,
                 accessibilityGranted: true,
-                inputMonitoringState: .denied
+                inputMonitoringState: .denied,
+                keyCombinationAssigned: true
             ),
             .keyCombination
         )
@@ -185,9 +188,23 @@ final class TriggerPermissionTests: XCTestCase {
                 modifierKey: .none,
                 mouseButton: .middle,
                 accessibilityGranted: true,
-                inputMonitoringState: .denied
+                inputMonitoringState: .denied,
+                keyCombinationAssigned: true
             ),
             .mouseButton(.middle)
+        )
+    }
+
+    func testUnavailableModifierWithClearedFallbackReportsNoGlobalTrigger() {
+        XCTAssertEqual(
+            ShortcutManager.resolveRecordingTrigger(
+                modifierKey: .rightOption,
+                mouseButton: .none,
+                accessibilityGranted: false,
+                inputMonitoringState: .denied,
+                keyCombinationAssigned: false
+            ),
+            .unavailable
         )
     }
 

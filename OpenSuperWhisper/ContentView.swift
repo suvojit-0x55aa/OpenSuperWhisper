@@ -317,23 +317,28 @@ struct ContentView: View {
     @State private var showDeleteConfirmation = false
     @State private var searchTask: Task<Void, Never>? = nil
 
-    private var currentShortcutDescription: String {
+    private var currentRecordingTrigger: RecordingTrigger {
         let mouseButton = MouseButton(rawValue: AppPreferences.shared.mouseButtonHotkey) ?? .none
         let modifierKey = ModifierKey(rawValue: AppPreferences.shared.modifierOnlyHotkey) ?? .none
-        let trigger = ShortcutManager.resolveRecordingTrigger(
+        return ShortcutManager.resolveRecordingTrigger(
             modifierKey: modifierKey,
             mouseButton: mouseButton,
             accessibilityGranted: permissionsManager.isAccessibilityPermissionGranted,
-            inputMonitoringState: permissionsManager.inputMonitoringPermissionState
+            inputMonitoringState: permissionsManager.inputMonitoringPermissionState,
+            keyCombinationAssigned: KeyboardShortcuts.getShortcut(for: .toggleRecord) != nil
         )
+    }
 
-        switch trigger {
+    private var currentShortcutDescription: String? {
+        switch currentRecordingTrigger {
         case .mouseButton(let mouseButton):
             return mouseButton.shortSymbol
         case .modifier(let modifierKey):
             return modifierKey.shortSymbol
         case .keyCombination:
-            return KeyboardShortcuts.getShortcut(for: .toggleRecord)?.description ?? ""
+            return KeyboardShortcuts.getShortcut(for: .toggleRecord)?.description
+        case .unavailable:
+            return nil
         }
     }
     
@@ -545,15 +550,30 @@ struct ContentView: View {
                         HStack(alignment: .bottom) {
                             VStack(alignment: .leading, spacing: 8) {
                                 // Подсказка о шорткате
-                                HStack(spacing: 6) {
-                                    Text(currentShortcutDescription)
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                    Text("to show mini recorder")
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
+                                if let shortcutDescription = currentShortcutDescription {
+                                    HStack(spacing: 6) {
+                                        Text(shortcutDescription)
+                                            .font(.caption)
+                                            .foregroundColor(.secondary)
+                                        Text("to show mini recorder")
+                                            .font(.caption)
+                                            .foregroundColor(.secondary)
+                                    }
+                                    .padding(.leading, 4)
+                                } else {
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text("No global trigger active.")
+                                            .font(.caption)
+                                            .foregroundColor(.secondary)
+                                        Button("Configure Key Combination in Settings") {
+                                            isSettingsPresented = true
+                                        }
+                                        .buttonStyle(.link)
+                                        .controlSize(.small)
+                                        .help("Open shortcut settings")
+                                    }
+                                    .padding(.leading, 4)
                                 }
-                                .padding(.leading, 4)
 
                                 // Подсказка о drag-n-drop
                                 HStack(spacing: 6) {

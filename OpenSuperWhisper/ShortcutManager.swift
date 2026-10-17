@@ -16,6 +16,7 @@ enum RecordingTrigger: Equatable {
     case keyCombination
     case modifier(ModifierKey)
     case mouseButton(MouseButton)
+    case unavailable
 }
 
 @MainActor
@@ -104,7 +105,8 @@ class ShortcutManager {
             modifierKey: modifierKey,
             mouseButton: mouseButton,
             accessibilityGranted: permissions.isAccessibilityPermissionGranted,
-            inputMonitoringState: permissions.inputMonitoringPermissionState
+            inputMonitoringState: permissions.inputMonitoringPermissionState,
+            keyCombinationAssigned: KeyboardShortcuts.getShortcut(for: .toggleRecord) != nil
         )
 
         ModifierKeyMonitor.shared.stop()
@@ -140,6 +142,9 @@ class ShortcutManager {
         case .keyCombination:
             KeyboardShortcuts.enable(.toggleRecord)
             print("ShortcutManager: Using regular keyboard shortcut")
+        case .unavailable:
+            KeyboardShortcuts.enable(.toggleRecord)
+            print("ShortcutManager: No global recording trigger is available")
         }
     }
 
@@ -147,7 +152,8 @@ class ShortcutManager {
         modifierKey: ModifierKey,
         mouseButton: MouseButton,
         accessibilityGranted: Bool,
-        inputMonitoringState: InputMonitoringPermissionState
+        inputMonitoringState: InputMonitoringPermissionState,
+        keyCombinationAssigned: Bool
     ) -> RecordingTrigger {
         if mouseButton != .none, accessibilityGranted {
             return .mouseButton(mouseButton)
@@ -157,7 +163,7 @@ class ShortcutManager {
            inputMonitoringState == .granted {
             return .modifier(modifierKey)
         }
-        return .keyCombination
+        return keyCombinationAssigned ? .keyCombination : .unavailable
     }
     
     private func handleKeyDown() {
