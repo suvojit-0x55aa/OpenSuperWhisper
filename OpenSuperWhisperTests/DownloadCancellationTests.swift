@@ -31,14 +31,20 @@ final class DownloadCancellationTests: XCTestCase {
             prefs.modifierOnlyHotkey = modifier
             prefs.lastModifierOnlyHotkey = lastModifier
         }
-        let settings = SettingsViewModel(downloadFluid: { _, _ in throw TranscriptionError.processingFailed })
+        let settings = SettingsViewModel(
+            downloadFluid: { _, _ in throw TranscriptionError.processingFailed },
+            ensureDownloadCapacity: {}
+        )
         let settingsModel = try XCTUnwrap(settings.downloadableFluidAudioModels.first)
         do {
             try await settings.downloadFluidAudioModel(settingsModel)
             XCTFail("Settings swallowed the download error")
         } catch { XCTAssertTrue(error is TranscriptionError) }
         XCTAssertFalse(settings.isDownloading)
-        let onboarding = OnboardingViewModel(downloadFluid: { _, _ in throw TranscriptionError.processingFailed })
+        let onboarding = OnboardingViewModel(
+            downloadFluid: { _, _ in throw TranscriptionError.processingFailed },
+            ensureDownloadCapacity: {}
+        )
         let onboardingModel = try XCTUnwrap(onboarding.unifiedModels.first {
             if case .parakeet = $0.type { return true }
             return false
@@ -54,9 +60,12 @@ final class DownloadCancellationTests: XCTestCase {
         let language = AppPreferences.shared.whisperLanguage
         defer { AppPreferences.shared.whisperLanguage = language }
         let gate = DownloadGate()
-        let vm = SettingsViewModel(downloadWhisper: { _, name, progress in
-            try await gate.download(name, progress: progress)
-        })
+        let vm = SettingsViewModel(
+            downloadWhisper: { _, name, progress in
+                try await gate.download(name, progress: progress)
+            },
+            ensureDownloadCapacity: {}
+        )
         let a = SettingsDownloadableModel(name: "A", isDownloaded: false,
             url: URL(string: "https://example.invalid/a.bin")!, size: 1, description: "test")
         let b = SettingsDownloadableModel(name: "B", isDownloaded: false,

@@ -30,6 +30,8 @@ actor EngineLoadGate {
 final class EngineLoadingTests: XCTestCase {
     let a = TranscriptionService.EngineSelection(engine: "A", modelPath: nil, modelVersion: "v3")
     let b = TranscriptionService.EngineSelection(engine: "B", modelPath: nil, modelVersion: "v3")
+    let c = TranscriptionService.EngineSelection(engine: "C", modelPath: nil, modelVersion: "v3")
+    let phonon = TranscriptionService.EngineSelection(engine: "phonon", modelPath: nil, modelVersion: "v3")
     let url = URL(fileURLWithPath: "/unused.wav")
 
     func waitForRequest(_ name: String, gate: EngineLoadGate) async throws {
@@ -86,6 +88,59 @@ final class EngineLoadingTests: XCTestCase {
         await gate.finish("B", result: .success(NamedTestEngine("B")))
         try await waitForCompletion(service)
         await gate.finish("A", result: .success(NamedTestEngine("A")))
+        try await Task.sleep(nanoseconds: 20_000_000)
+        let text = try await service.transcribeAudio(url: url, settings: Settings())
+        XCTAssertEqual(text, "B")
+    }
+
+    func testReplacementWaitsForSupersededPhononLoad() async throws {
+        let gate = EngineLoadGate()
+        let service = TranscriptionService(selection: phonon, engineLoader: { try await gate.load($0) })
+        try await waitForRequest("phonon", gate: gate)
+
+        service.loadEngine(selection: b)
+        try await Task.sleep(nanoseconds: 20_000_000)
+        let didStartFirstReplacement = await gate.hasRequest("B")
+        XCTAssertFalse(didStartFirstReplacement)
+
+        service.loadEngine(selection: c)
+        try await Task.sleep(nanoseconds: 20_000_000)
+        let didStartLatestReplacement = await gate.hasRequest("C")
+        XCTAssertFalse(didStartLatestReplacement)
+
+        await gate.finish("phonon", result: .success(NamedTestEngine("phonon")))
+        try await waitForRequest("C", gate: gate)
+        let didStartCancelledReplacement = await gate.hasRequest("B")
+        XCTAssertFalse(didStartCancelledReplacement)
+        await gate.finish("C", result: .success(NamedTestEngine("C")))
+        try await waitForCompletion(service)
+
+        let text = try await service.transcribeAudio(url: url, settings: Settings())
+        XCTAssertEqual(text, "C")
+    }
+
+    func testReplacementDoesNotWaitForPhononWhisperFallback() async throws {
+        let gate = EngineLoadGate()
+        let service = TranscriptionService(
+            selection: phonon,
+            engineLoader: { try await gate.load($0) },
+            nativePhononLoader: { _ in
+                try await gate.load(.init(engine: "phonon-native", modelPath: nil, modelVersion: "v3"))
+            },
+            phononFallbackLoader: { _, _ in
+                try await gate.load(.init(engine: "phonon-fallback", modelPath: nil, modelVersion: "v3"))
+            }
+        )
+        try await waitForRequest("phonon-native", gate: gate)
+        await gate.finish("phonon-native", result: .failure(TranscriptionError.contextInitializationFailed))
+        try await waitForRequest("phonon-fallback", gate: gate)
+
+        service.loadEngine(selection: b)
+        try await waitForRequest("B", gate: gate)
+        await gate.finish("B", result: .success(NamedTestEngine("B")))
+        try await waitForCompletion(service)
+
+        await gate.finish("phonon-fallback", result: .success(NamedTestEngine("fallback")))
         try await Task.sleep(nanoseconds: 20_000_000)
         let text = try await service.transcribeAudio(url: url, settings: Settings())
         XCTAssertEqual(text, "B")
