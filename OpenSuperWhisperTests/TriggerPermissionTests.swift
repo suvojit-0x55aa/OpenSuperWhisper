@@ -315,15 +315,28 @@ final class TriggerPermissionTests: XCTestCase {
             stopHoldRecording: { stopCount += 1 }
         )
         var teardownCount = 0
-        let permissions = CurrentValueSubject<Int, Never>(0)
-        manager.observeTriggerPermissions(permissions.eraseToAnyPublisher()) { [weak manager] in
+        let initialSnapshot = TriggerPermissionSnapshot(
+            accessibilityGranted: false,
+            inputMonitoringState: .notDetermined
+        )
+        let permissions = CurrentValueSubject<TriggerPermissionSnapshot, Never>(initialSnapshot)
+        manager.observeTriggerPermissions(
+            permissions.eraseToAnyPublisher(),
+            initialSnapshot: initialSnapshot
+        ) { [weak manager] _ in
             manager?.prepareForTriggerReplacement {
                 teardownCount += 1
             }
         }
+        teardownCount = 0
 
         manager.scheduleHoldActivation(after: 0.01)
-        permissions.send(1)
+        permissions.send(
+            TriggerPermissionSnapshot(
+                accessibilityGranted: false,
+                inputMonitoringState: .granted
+            )
+        )
         try? await Task.sleep(nanoseconds: 50_000_000)
 
         XCTAssertEqual(teardownCount, 1)
@@ -453,20 +466,74 @@ final class TriggerPermissionTests: XCTestCase {
         XCTAssertEqual(manager.activeRecordingTrigger, .unavailable)
     }
 
-    func testPermissionGrantAndRevocationReconfigureTriggerOnce() {
-        let permissions = CurrentValueSubject<Int, Never>(0)
+    func testInitialInputMonitoringGrantActivatesModifierOnceAndTracksRevocation() {
+        let initialSnapshot = TriggerPermissionSnapshot(
+            accessibilityGranted: false,
+            inputMonitoringState: .granted
+        )
+        let permissions = CurrentValueSubject<TriggerPermissionSnapshot, Never>(initialSnapshot)
         let manager = ShortcutManager(registerShortcuts: false)
-        var changes = 0
-        manager.observeTriggerPermissions(permissions.eraseToAnyPublisher()) { changes += 1 }
-        permissions.send(0)
-        XCTAssertEqual(changes, 0)
-        permissions.send(1)
-        permissions.send(1)
-        XCTAssertEqual(changes, 1)
-        permissions.send(3)
-        permissions.send(0)
-        permissions.send(3)
-        XCTAssertEqual(changes, 4)
+        var activeTriggers: [RecordingTrigger] = []
+        manager.observeTriggerPermissions(
+            permissions.eraseToAnyPublisher(),
+            initialSnapshot: initialSnapshot
+        ) { snapshot in
+            activeTriggers.append(
+                ShortcutManager.resolveRecordingTrigger(
+                    modifierKey: .rightOption,
+                    mouseButton: .none,
+                    accessibilityGranted: snapshot.accessibilityGranted,
+                    inputMonitoringState: snapshot.inputMonitoringState,
+                    keyCombinationAssigned: true
+                )
+            )
+        }
+
+        XCTAssertEqual(activeTriggers, [.modifier(.rightOption)])
+        permissions.send(initialSnapshot)
+        XCTAssertEqual(activeTriggers, [.modifier(.rightOption)])
+        permissions.send(
+            TriggerPermissionSnapshot(
+                accessibilityGranted: false,
+                inputMonitoringState: .denied
+            )
+        )
+        XCTAssertEqual(activeTriggers, [.modifier(.rightOption), .keyCombination])
+    }
+
+    func testInitialAccessibilityGrantActivatesMouseOnceAndTracksRevocation() {
+        let initialSnapshot = TriggerPermissionSnapshot(
+            accessibilityGranted: true,
+            inputMonitoringState: .denied
+        )
+        let permissions = CurrentValueSubject<TriggerPermissionSnapshot, Never>(initialSnapshot)
+        let manager = ShortcutManager(registerShortcuts: false)
+        var activeTriggers: [RecordingTrigger] = []
+        manager.observeTriggerPermissions(
+            permissions.eraseToAnyPublisher(),
+            initialSnapshot: initialSnapshot
+        ) { snapshot in
+            activeTriggers.append(
+                ShortcutManager.resolveRecordingTrigger(
+                    modifierKey: .none,
+                    mouseButton: .middle,
+                    accessibilityGranted: snapshot.accessibilityGranted,
+                    inputMonitoringState: snapshot.inputMonitoringState,
+                    keyCombinationAssigned: true
+                )
+            )
+        }
+
+        XCTAssertEqual(activeTriggers, [.mouseButton(.middle)])
+        permissions.send(initialSnapshot)
+        XCTAssertEqual(activeTriggers, [.mouseButton(.middle)])
+        permissions.send(
+            TriggerPermissionSnapshot(
+                accessibilityGranted: false,
+                inputMonitoringState: .denied
+            )
+        )
+        XCTAssertEqual(activeTriggers, [.mouseButton(.middle), .keyCombination])
     }
 
     private func makeManager(_ system: MockPermissionSystem) -> PermissionsManager {

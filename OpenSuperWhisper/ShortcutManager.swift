@@ -19,6 +19,11 @@ enum RecordingTrigger: Equatable {
     case unavailable
 }
 
+struct TriggerPermissionSnapshot: Equatable {
+    let accessibilityGranted: Bool
+    let inputMonitoringState: InputMonitoringPermissionState
+}
+
 @MainActor
 class ShortcutManager: ObservableObject {
     static let shared = ShortcutManager()
@@ -48,11 +53,23 @@ class ShortcutManager: ObservableObject {
         let permissions = PermissionsManager.shared
         triggerPermissions = permissions
         setupKeyboardShortcuts()
-        setupRecordingTrigger()
+        let initialPermissionSnapshot = TriggerPermissionSnapshot(
+            accessibilityGranted: permissions.isAccessibilityPermissionGranted,
+            inputMonitoringState: permissions.inputMonitoringPermissionState
+        )
         observeTriggerPermissions(permissions.$isAccessibilityPermissionGranted
             .combineLatest(permissions.$inputMonitoringPermissionState)
-            .map { ($0 ? 1 : 0) | ($1 == .granted ? 2 : 0) }
-            .eraseToAnyPublisher()) { [weak self] in self?.setupRecordingTrigger() }
+            .map {
+                TriggerPermissionSnapshot(
+                    accessibilityGranted: $0,
+                    inputMonitoringState: $1
+                )
+            }
+            .eraseToAnyPublisher(),
+            initialSnapshot: initialPermissionSnapshot
+        ) { [weak self] snapshot in
+            self?.setupRecordingTrigger(permissionSnapshot: snapshot)
+        }
         
         NotificationCenter.default.addObserver(
             self,
@@ -69,11 +86,19 @@ class ShortcutManager: ObservableObject {
         )
     }
     
-    func observeTriggerPermissions(_ publisher: AnyPublisher<Int, Never>, reconfigure: @escaping () -> Void) {
+    func observeTriggerPermissions(
+        _ publisher: AnyPublisher<TriggerPermissionSnapshot, Never>,
+        initialSnapshot: TriggerPermissionSnapshot,
+        reconfigure: @escaping (TriggerPermissionSnapshot) -> Void
+    ) {
         permissionSubscription = publisher
-            .removeDuplicates()
-            .dropFirst()
-            .sink { _ in reconfigure() }
+            .prepend(initialSnapshot)
+            .removeDuplicates { previous, current in
+                previous.accessibilityGranted == current.accessibilityGranted
+                    && (previous.inputMonitoringState == .granted)
+                    == (current.inputMonitoringState == .granted)
+            }
+            .sink(receiveValue: reconfigure)
     }
 
     @objc private func indicatorWindowDidHide() {
@@ -109,16 +134,20 @@ class ShortcutManager: ObservableObject {
         }
     }
 
-    private func setupRecordingTrigger() {
+    private func setupRecordingTrigger(permissionSnapshot: TriggerPermissionSnapshot? = nil) {
         let modifierKey = ModifierKey(rawValue: AppPreferences.shared.modifierOnlyHotkey) ?? .none
         let mouseButton = MouseButton(rawValue: AppPreferences.shared.mouseButtonHotkey) ?? .none
         let permissions = triggerPermissions ?? PermissionsManager.shared
+        let permissionSnapshot = permissionSnapshot ?? TriggerPermissionSnapshot(
+            accessibilityGranted: permissions.isAccessibilityPermissionGranted,
+            inputMonitoringState: permissions.inputMonitoringPermissionState
+        )
         let keyCombinationAssigned = KeyboardShortcuts.getShortcut(for: .toggleRecord) != nil
         let trigger = Self.resolveRecordingTrigger(
             modifierKey: modifierKey,
             mouseButton: mouseButton,
-            accessibilityGranted: permissions.isAccessibilityPermissionGranted,
-            inputMonitoringState: permissions.inputMonitoringPermissionState,
+            accessibilityGranted: permissionSnapshot.accessibilityGranted,
+            inputMonitoringState: permissionSnapshot.inputMonitoringState,
             keyCombinationAssigned: keyCombinationAssigned
         )
 
