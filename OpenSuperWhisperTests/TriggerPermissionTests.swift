@@ -306,8 +306,41 @@ final class TriggerPermissionTests: XCTestCase {
         }
     }
 
+    func testPermissionDrivenTriggerReplacementCancelsPendingHoldBeforeTeardown() async {
+        var stopCount = 0
+        let manager = ShortcutManager(
+            registerShortcuts: false,
+            holdToRecordEnabled: { true },
+            stopHoldRecording: { stopCount += 1 }
+        )
+        var teardownCount = 0
+        let permissions = CurrentValueSubject<Int, Never>(0)
+        manager.observeTriggerPermissions(permissions.eraseToAnyPublisher()) { [weak manager] in
+            manager?.prepareForTriggerReplacement {
+                teardownCount += 1
+            }
+        }
+
+        manager.scheduleHoldActivation(after: 0.01)
+        permissions.send(1)
+        try? await Task.sleep(nanoseconds: 50_000_000)
+
+        XCTAssertEqual(teardownCount, 1)
+        XCTAssertEqual(stopCount, 0)
+        XCTAssertFalse(manager.holdMode)
+    }
+
     func testModifierRuntimeReenableFailurePublishesAssignedFallback() async {
-        let manager = ShortcutManager(registerShortcuts: false)
+        var stopCount = 0
+        var transitionEvents: [String] = []
+        let manager = ShortcutManager(
+            registerShortcuts: false,
+            holdToRecordEnabled: { true },
+            stopHoldRecording: {
+                stopCount += 1
+                transitionEvents.append("release")
+            }
+        )
         let monitor = ModifierKeyMonitor()
         var keyCombinationEnabled = true
         let fallbackPublished = expectation(description: "modifier fallback published")
@@ -322,13 +355,25 @@ final class TriggerPermissionTests: XCTestCase {
                 }
                 return true
             },
-            setKeyCombinationEnabled: { keyCombinationEnabled = $0 }
+            setKeyCombinationEnabled: {
+                keyCombinationEnabled = $0
+                if $0 {
+                    transitionEvents.append("fallback")
+                }
+            }
         )
 
         XCTAssertEqual(activeTrigger, .modifier(.rightOption))
         XCTAssertFalse(keyCombinationEnabled)
+        manager.scheduleHoldActivation(after: 0)
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertTrue(manager.holdMode)
         monitor.handleTapDisabled(reenable: { false })
         await fulfillment(of: [fallbackPublished], timeout: 1)
+        XCTAssertEqual(stopCount, 1)
+        XCTAssertEqual(transitionEvents, ["release", "fallback"])
+        XCTAssertFalse(manager.holdMode)
+        XCTAssertNil(monitor.onFailure)
         XCTAssertTrue(keyCombinationEnabled)
         XCTAssertEqual(manager.activeRecordingTrigger, .keyCombination)
     }

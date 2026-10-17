@@ -160,10 +160,8 @@ class MouseButtonMonitor {
 
     private func reportFailure() {
         let failure = onFailure
+        failure?()
         stop()
-        DispatchQueue.main.async {
-            failure?()
-        }
     }
 
     /// Returns `true` when the event belongs to the bound button and should be consumed.

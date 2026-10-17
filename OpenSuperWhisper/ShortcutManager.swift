@@ -29,10 +29,19 @@ class ShortcutManager: ObservableObject {
     private var activeVm: IndicatorViewModel?
     private var holdWorkItem: DispatchWorkItem?
     private let holdThreshold: TimeInterval = 0.3
-    private var holdMode = false
+    private(set) var holdMode = false
+    private var holdGeneration = 0
     private var triggerGeneration = 0
+    private let holdToRecordEnabled: () -> Bool
+    private let stopHoldRecording: () -> Void
 
-    init(registerShortcuts: Bool = true) {
+    init(
+        registerShortcuts: Bool = true,
+        holdToRecordEnabled: @escaping () -> Bool = { AppPreferences.shared.holdToRecord },
+        stopHoldRecording: @escaping () -> Void = { IndicatorWindowManager.shared.stopRecording() }
+    ) {
+        self.holdToRecordEnabled = holdToRecordEnabled
+        self.stopHoldRecording = stopHoldRecording
         guard registerShortcuts else { return }
         print("ShortcutManager init")
 
@@ -68,6 +77,7 @@ class ShortcutManager: ObservableObject {
     }
 
     @objc private func indicatorWindowDidHide() {
+        cancelPendingHold()
         activeVm = nil
         holdMode = false
     }
@@ -112,9 +122,10 @@ class ShortcutManager: ObservableObject {
             keyCombinationAssigned: keyCombinationAssigned
         )
 
-        triggerGeneration += 1
-        ModifierKeyMonitor.shared.stop()
-        MouseButtonMonitor.shared.stop()
+        prepareForTriggerReplacement {
+            ModifierKeyMonitor.shared.stop()
+            MouseButtonMonitor.shared.stop()
+        }
 
         switch trigger {
         case .mouseButton(let button):
@@ -184,6 +195,12 @@ class ShortcutManager: ObservableObject {
         }
     }
 
+    func prepareForTriggerReplacement(stopMonitors: () -> Void) {
+        handleKeyUp()
+        triggerGeneration += 1
+        stopMonitors()
+    }
+
     @discardableResult
     func activateEventTapTrigger(
         _ requestedTrigger: RecordingTrigger,
@@ -220,6 +237,7 @@ class ShortcutManager: ObservableObject {
         keyCombinationAssigned: Bool,
         setKeyCombinationEnabled: (Bool) -> Void
     ) -> RecordingTrigger {
+        handleKeyUp()
         setKeyCombinationEnabled(true)
         let trigger: RecordingTrigger = keyCombinationAssigned ? .keyCombination : .unavailable
         activeRecordingTrigger = trigger
@@ -253,7 +271,7 @@ class ShortcutManager: ObservableObject {
     }
     
     private func handleKeyDown() {
-        holdWorkItem?.cancel()
+        cancelPendingHold()
         holdMode = false
         
         let session = RecordingSessionController.shared
@@ -271,11 +289,24 @@ class ShortcutManager: ObservableObject {
             let point = FocusUtils.chooseIndicatorPoint(resolvedInputAnchor: anchorPoint, cursorPosition: cursorPosition)
             IndicatorWindowManager.shared.presentWindow(for: vm, nearPoint: point)
         }
-        if AppPreferences.shared.holdToRecord && session.isCapturing {
-            let workItem = DispatchWorkItem { [weak self] in self?.holdMode = true }
-            holdWorkItem = workItem
-            DispatchQueue.main.asyncAfter(deadline: .now() + holdThreshold, execute: workItem)
+        if holdToRecordEnabled() && session.isCapturing {
+            scheduleHoldActivation()
         }
+    }
+
+    func scheduleHoldActivation(after delay: TimeInterval? = nil) {
+        cancelPendingHold()
+        let generation = holdGeneration
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self, self.holdGeneration == generation else { return }
+            self.holdMode = true
+            self.holdWorkItem = nil
+        }
+        holdWorkItem = workItem
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + (delay ?? holdThreshold),
+            execute: workItem
+        )
     }
 
     /// Resolves the input anchor without letting a slow focused app delay the
@@ -310,16 +341,17 @@ class ShortcutManager: ObservableObject {
     }
     
     private func handleKeyUp() {
+        cancelPendingHold()
+
+        if holdMode {
+            stopHoldRecording()
+        }
+        holdMode = false
+    }
+
+    private func cancelPendingHold() {
+        holdGeneration += 1
         holdWorkItem?.cancel()
         holdWorkItem = nil
-        
-        let holdToRecordEnabled = AppPreferences.shared.holdToRecord
-        
-        Task { @MainActor in
-            if holdToRecordEnabled && self.holdMode && self.activeVm != nil {
-                IndicatorWindowManager.shared.stopRecording()
-            }
-            self.holdMode = false
-        }
     }
 }

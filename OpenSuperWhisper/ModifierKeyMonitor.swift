@@ -215,10 +215,8 @@ class ModifierKeyMonitor {
 
     private func reportFailure() {
         let failure = onFailure
+        failure?()
         stop()
-        DispatchQueue.main.async {
-            failure?()
-        }
     }
     
     func handleFlagsChanged(event: CGEvent) {
