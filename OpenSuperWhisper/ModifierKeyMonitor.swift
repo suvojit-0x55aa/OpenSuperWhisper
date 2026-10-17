@@ -151,9 +151,7 @@ class ModifierKeyMonitor {
                 let monitor = Unmanaged<ModifierKeyMonitor>.fromOpaque(refcon).takeUnretainedValue()
                 
                 if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
-                    if !monitor.reenableTap() {
-                        monitor.reportFailure()
-                    }
+                    monitor.handleTapDisabled(reenable: monitor.reenableTap)
                     return Unmanaged.passUnretained(event)
                 }
                 
@@ -199,6 +197,12 @@ class ModifierKeyMonitor {
         isModifierPressed = false
         onFailure = nil
         print("ModifierKeyMonitor: Stopped")
+    }
+
+    func handleTapDisabled(reenable: () -> Bool) {
+        if !reenable() {
+            reportFailure()
+        }
     }
     
     fileprivate func reenableTap() -> Bool {

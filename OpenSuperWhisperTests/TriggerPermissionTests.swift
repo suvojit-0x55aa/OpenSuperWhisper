@@ -280,16 +280,46 @@ final class TriggerPermissionTests: XCTestCase {
         XCTAssertEqual(manager.activeRecordingTrigger, .unavailable)
     }
 
-    func testModifierRuntimeFailureCallbackPublishesAssignedFallback() {
+    func testNoticeChecksBeforeReportingInitialInputMonitoringState() {
+        let states: [InputMonitoringPermissionState] = [
+            .notDetermined,
+            .denied,
+            .restartRequired,
+            .granted
+        ]
+
+        for state in states {
+            XCTAssertEqual(
+                InputMonitoringPermissionNotice.presentation(
+                    hasCompletedInitialCheck: false,
+                    permissionState: state
+                ),
+                .checking
+            )
+            XCTAssertEqual(
+                InputMonitoringPermissionNotice.presentation(
+                    hasCompletedInitialCheck: true,
+                    permissionState: state
+                ),
+                .resolved(state)
+            )
+        }
+    }
+
+    func testModifierRuntimeReenableFailurePublishesAssignedFallback() async {
         let manager = ShortcutManager(registerShortcuts: false)
+        let monitor = ModifierKeyMonitor()
         var keyCombinationEnabled = true
-        var failure: (() -> Void)?
+        let fallbackPublished = expectation(description: "modifier fallback published")
 
         let activeTrigger = manager.activateEventTapTrigger(
             .modifier(.rightOption),
             keyCombinationAssigned: { true },
-            startMonitor: {
-                failure = $0
+            startMonitor: { failure in
+                monitor.onFailure = {
+                    failure()
+                    fallbackPublished.fulfill()
+                }
                 return true
             },
             setKeyCombinationEnabled: { keyCombinationEnabled = $0 }
@@ -297,21 +327,26 @@ final class TriggerPermissionTests: XCTestCase {
 
         XCTAssertEqual(activeTrigger, .modifier(.rightOption))
         XCTAssertFalse(keyCombinationEnabled)
-        failure?()
+        monitor.handleTapDisabled(reenable: { false })
+        await fulfillment(of: [fallbackPublished], timeout: 1)
         XCTAssertTrue(keyCombinationEnabled)
         XCTAssertEqual(manager.activeRecordingTrigger, .keyCombination)
     }
 
-    func testMouseRuntimeFailureCallbackPublishesUnavailableWithoutFallback() {
+    func testMouseRuntimeReenableFailurePublishesUnavailableWithoutFallback() async {
         let manager = ShortcutManager(registerShortcuts: false)
+        let monitor = MouseButtonMonitor()
         var keyCombinationEnabled = true
-        var failure: (() -> Void)?
+        let fallbackPublished = expectation(description: "mouse fallback published")
 
         let activeTrigger = manager.activateEventTapTrigger(
             .mouseButton(.middle),
             keyCombinationAssigned: { false },
-            startMonitor: {
-                failure = $0
+            startMonitor: { failure in
+                monitor.onFailure = {
+                    failure()
+                    fallbackPublished.fulfill()
+                }
                 return true
             },
             setKeyCombinationEnabled: { keyCombinationEnabled = $0 }
@@ -319,7 +354,8 @@ final class TriggerPermissionTests: XCTestCase {
 
         XCTAssertEqual(activeTrigger, .mouseButton(.middle))
         XCTAssertFalse(keyCombinationEnabled)
-        failure?()
+        monitor.handleTapDisabled(reenable: { false })
+        await fulfillment(of: [fallbackPublished], timeout: 1)
         XCTAssertTrue(keyCombinationEnabled)
         XCTAssertEqual(manager.activeRecordingTrigger, .unavailable)
     }
