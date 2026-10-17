@@ -1,5 +1,6 @@
 import AVFoundation
 import Combine
+import CoreGraphics
 import XCTest
 @testable import OpenSuperWhisper
 
@@ -330,6 +331,53 @@ final class TriggerPermissionTests: XCTestCase {
         XCTAssertFalse(manager.holdMode)
     }
 
+    func testModifierQueuedDownIsInvalidatedByTriggerReplacement() async throws {
+        let manager = ShortcutManager(registerShortcuts: false)
+        let monitor = ModifierKeyMonitor(modifierKey: .rightOption)
+        var downCount = 0
+        monitor.onKeyDown = { downCount += 1 }
+        let event = try XCTUnwrap(
+            CGEvent(
+                keyboardEventSource: nil,
+                virtualKey: ModifierKey.rightOption.keyCode,
+                keyDown: true
+            )
+        )
+        event.flags = ModifierKey.rightOption.physicalEventFlag
+
+        monitor.handleFlagsChanged(event: event)
+        manager.prepareForTriggerReplacement {
+            monitor.stop()
+        }
+        await drainMainQueue()
+
+        XCTAssertEqual(downCount, 0)
+    }
+
+    func testMouseQueuedDownIsInvalidatedByTriggerReplacement() async throws {
+        let manager = ShortcutManager(registerShortcuts: false)
+        let monitor = MouseButtonMonitor(mouseButton: .middle)
+        var downCount = 0
+        monitor.onButtonDown = { downCount += 1 }
+        let event = try XCTUnwrap(
+            CGEvent(
+                mouseEventSource: nil,
+                mouseType: .otherMouseDown,
+                mouseCursorPosition: .zero,
+                mouseButton: .center
+            )
+        )
+        event.setIntegerValueField(.mouseEventButtonNumber, value: MouseButton.middle.buttonNumber)
+
+        XCTAssertTrue(monitor.handleMouseEvent(type: .otherMouseDown, event: event))
+        manager.prepareForTriggerReplacement {
+            monitor.stop()
+        }
+        await drainMainQueue()
+
+        XCTAssertEqual(downCount, 0)
+    }
+
     func testModifierRuntimeReenableFailurePublishesAssignedFallback() async {
         var stopCount = 0
         var transitionEvents: [String] = []
@@ -451,5 +499,13 @@ final class TriggerPermissionTests: XCTestCase {
         manager.requestInputMonitoringPermissionIfNeeded()
         await fulfillment(of: [changed], timeout: 1)
         withExtendedLifetime(cancellable) {}
+    }
+
+    private func drainMainQueue() async {
+        let drained = expectation(description: "main queue drained")
+        DispatchQueue.main.async {
+            drained.fulfill()
+        }
+        await fulfillment(of: [drained], timeout: 1)
     }
 }

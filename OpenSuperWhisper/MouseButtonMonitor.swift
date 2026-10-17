@@ -53,12 +53,15 @@ class MouseButtonMonitor {
     private var runLoopSource: CFRunLoopSource?
     private var selectedMouseButton: MouseButton = .none
     private var isButtonPressed = false
+    private var deliveryGeneration = 0
 
     var onButtonDown: (() -> Void)?
     var onButtonUp: (() -> Void)?
     var onFailure: (() -> Void)?
 
-    init() {}
+    init(mouseButton: MouseButton = .none) {
+        selectedMouseButton = mouseButton
+    }
 
     @discardableResult
     func start(mouseButton: MouseButton) -> Bool {
@@ -131,6 +134,7 @@ class MouseButtonMonitor {
     }
 
     func stop() {
+        deliveryGeneration += 1
         if let tap = eventTap {
             CGEvent.tapEnable(tap: tap, enable: false)
             if let source = runLoopSource {
@@ -165,7 +169,7 @@ class MouseButtonMonitor {
     }
 
     /// Returns `true` when the event belongs to the bound button and should be consumed.
-    private func handleMouseEvent(type: CGEventType, event: CGEvent) -> Bool {
+    func handleMouseEvent(type: CGEventType, event: CGEvent) -> Bool {
         let buttonNumber = event.getIntegerValueField(.mouseEventButtonNumber)
         guard buttonNumber == selectedMouseButton.buttonNumber else { return false }
 
@@ -173,21 +177,29 @@ class MouseButtonMonitor {
         case .otherMouseDown:
             if !isButtonPressed {
                 isButtonPressed = true
-                DispatchQueue.main.async {
-                    self.onButtonDown?()
+                enqueueDelivery { monitor in
+                    monitor.onButtonDown?()
                 }
             }
         case .otherMouseUp:
             if isButtonPressed {
                 isButtonPressed = false
-                DispatchQueue.main.async {
-                    self.onButtonUp?()
+                enqueueDelivery { monitor in
+                    monitor.onButtonUp?()
                 }
             }
         default:
             return false
         }
         return true
+    }
+
+    private func enqueueDelivery(_ delivery: @escaping (MouseButtonMonitor) -> Void) {
+        let generation = deliveryGeneration
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.deliveryGeneration == generation else { return }
+            delivery(self)
+        }
     }
 
     deinit {

@@ -117,6 +117,7 @@ class ModifierKeyMonitor {
     private var runLoopSource: CFRunLoopSource?
     private var selectedModifierKey: ModifierKey = .none
     private var isModifierPressed = false
+    private var deliveryGeneration = 0
     
     var onKeyDown: (() -> Void)?
     var onKeyUp: (() -> Void)?
@@ -186,6 +187,7 @@ class ModifierKeyMonitor {
     }
     
     func stop() {
+        deliveryGeneration += 1
         if let tap = eventTap {
             CGEvent.tapEnable(tap: tap, enable: false)
             if let source = runLoopSource {
@@ -230,14 +232,22 @@ class ModifierKeyMonitor {
         
         if isPressed && !isModifierPressed {
             isModifierPressed = true
-            DispatchQueue.main.async {
-                self.onKeyDown?()
+            enqueueDelivery { monitor in
+                monitor.onKeyDown?()
             }
         } else if !isPressed && isModifierPressed {
             isModifierPressed = false
-            DispatchQueue.main.async {
-                self.onKeyUp?()
+            enqueueDelivery { monitor in
+                monitor.onKeyUp?()
             }
+        }
+    }
+
+    private func enqueueDelivery(_ delivery: @escaping (ModifierKeyMonitor) -> Void) {
+        let generation = deliveryGeneration
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.deliveryGeneration == generation else { return }
+            delivery(self)
         }
     }
     
