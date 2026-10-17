@@ -43,10 +43,12 @@ class ShortcutManager: ObservableObject {
     init(
         registerShortcuts: Bool = true,
         holdToRecordEnabled: @escaping () -> Bool = { AppPreferences.shared.holdToRecord },
-        stopHoldRecording: @escaping () -> Void = { IndicatorWindowManager.shared.stopRecording() }
+        stopHoldRecording: (() -> Void)? = nil
     ) {
         self.holdToRecordEnabled = holdToRecordEnabled
-        self.stopHoldRecording = stopHoldRecording
+        self.stopHoldRecording = stopHoldRecording ?? {
+            IndicatorWindowManager.shared.stopRecording()
+        }
         guard registerShortcuts else { return }
         print("ShortcutManager init")
 
