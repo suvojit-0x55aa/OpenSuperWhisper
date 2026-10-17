@@ -30,6 +30,7 @@ class ShortcutManager: ObservableObject {
     private var holdWorkItem: DispatchWorkItem?
     private let holdThreshold: TimeInterval = 0.3
     private var holdMode = false
+    private var triggerGeneration = 0
 
     init(registerShortcuts: Bool = true) {
         guard registerShortcuts else { return }
@@ -111,6 +112,7 @@ class ShortcutManager: ObservableObject {
             keyCombinationAssigned: keyCombinationAssigned
         )
 
+        triggerGeneration += 1
         ModifierKeyMonitor.shared.stop()
         MouseButtonMonitor.shared.stop()
 
@@ -126,8 +128,14 @@ class ShortcutManager: ObservableObject {
 
             let activeTrigger = activateEventTapTrigger(
                 .mouseButton(button),
-                keyCombinationAssigned: keyCombinationAssigned,
-                startMonitor: { MouseButtonMonitor.shared.start(mouseButton: button) },
+                keyCombinationAssigned: {
+                    KeyboardShortcuts.getShortcut(for: .toggleRecord) != nil
+                },
+                startMonitor: { onFailure in
+                    let started = MouseButtonMonitor.shared.start(mouseButton: button)
+                    MouseButtonMonitor.shared.onFailure = started ? onFailure : nil
+                    return started
+                },
                 setKeyCombinationEnabled: Self.setKeyCombinationEnabled
             )
             if activeTrigger == .mouseButton(button) {
@@ -148,8 +156,14 @@ class ShortcutManager: ObservableObject {
 
             let activeTrigger = activateEventTapTrigger(
                 .modifier(modifier),
-                keyCombinationAssigned: keyCombinationAssigned,
-                startMonitor: { ModifierKeyMonitor.shared.start(modifierKey: modifier) },
+                keyCombinationAssigned: {
+                    KeyboardShortcuts.getShortcut(for: .toggleRecord) != nil
+                },
+                startMonitor: { onFailure in
+                    let started = ModifierKeyMonitor.shared.start(modifierKey: modifier)
+                    ModifierKeyMonitor.shared.onFailure = started ? onFailure : nil
+                    return started
+                },
                 setKeyCombinationEnabled: Self.setKeyCombinationEnabled
             )
             if activeTrigger == .modifier(modifier) {
@@ -173,18 +187,41 @@ class ShortcutManager: ObservableObject {
     @discardableResult
     func activateEventTapTrigger(
         _ requestedTrigger: RecordingTrigger,
-        keyCombinationAssigned: Bool,
-        startMonitor: () -> Bool,
-        setKeyCombinationEnabled: (Bool) -> Void
+        keyCombinationAssigned: @escaping () -> Bool,
+        startMonitor: (_ onFailure: @escaping () -> Void) -> Bool,
+        setKeyCombinationEnabled: @escaping (Bool) -> Void
     ) -> RecordingTrigger {
+        let generation = triggerGeneration
+        let onFailure = { [weak self] in
+            guard let self,
+                  self.triggerGeneration == generation,
+                  self.activeRecordingTrigger == requestedTrigger else { return }
+            self.publishFallback(
+                keyCombinationAssigned: keyCombinationAssigned(),
+                setKeyCombinationEnabled: setKeyCombinationEnabled
+            )
+        }
         let trigger: RecordingTrigger
-        if startMonitor() {
+        if startMonitor(onFailure) {
             setKeyCombinationEnabled(false)
             trigger = requestedTrigger
         } else {
-            setKeyCombinationEnabled(true)
-            trigger = keyCombinationAssigned ? .keyCombination : .unavailable
+            return publishFallback(
+                keyCombinationAssigned: keyCombinationAssigned(),
+                setKeyCombinationEnabled: setKeyCombinationEnabled
+            )
         }
+        activeRecordingTrigger = trigger
+        return trigger
+    }
+
+    @discardableResult
+    private func publishFallback(
+        keyCombinationAssigned: Bool,
+        setKeyCombinationEnabled: (Bool) -> Void
+    ) -> RecordingTrigger {
+        setKeyCombinationEnabled(true)
+        let trigger: RecordingTrigger = keyCombinationAssigned ? .keyCombination : .unavailable
         activeRecordingTrigger = trigger
         return trigger
     }

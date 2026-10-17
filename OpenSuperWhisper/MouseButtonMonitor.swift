@@ -56,6 +56,7 @@ class MouseButtonMonitor {
 
     var onButtonDown: (() -> Void)?
     var onButtonUp: (() -> Void)?
+    var onFailure: (() -> Void)?
 
     private init() {}
 
@@ -92,7 +93,9 @@ class MouseButtonMonitor {
                 let monitor = Unmanaged<MouseButtonMonitor>.fromOpaque(refcon).takeUnretainedValue()
 
                 if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
-                    monitor.reenableTap()
+                    if !monitor.reenableTap() {
+                        monitor.reportFailure()
+                    }
                     return Unmanaged.passUnretained(event)
                 }
 
@@ -139,13 +142,23 @@ class MouseButtonMonitor {
         eventTap = nil
         runLoopSource = nil
         isButtonPressed = false
+        onFailure = nil
         print("MouseButtonMonitor: Stopped")
     }
 
-    fileprivate func reenableTap() {
-        if let tap = eventTap {
-            CGEvent.tapEnable(tap: tap, enable: true)
-            print("MouseButtonMonitor: Re-enabled tap after timeout")
+    fileprivate func reenableTap() -> Bool {
+        guard let tap = eventTap else { return false }
+        CGEvent.tapEnable(tap: tap, enable: true)
+        guard CGEvent.tapIsEnabled(tap: tap) else { return false }
+        print("MouseButtonMonitor: Re-enabled tap after timeout")
+        return true
+    }
+
+    private func reportFailure() {
+        let failure = onFailure
+        stop()
+        DispatchQueue.main.async {
+            failure?()
         }
     }
 

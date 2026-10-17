@@ -120,6 +120,7 @@ class ModifierKeyMonitor {
     
     var onKeyDown: (() -> Void)?
     var onKeyUp: (() -> Void)?
+    var onFailure: (() -> Void)?
     
     init(modifierKey: ModifierKey = .none) { selectedModifierKey = modifierKey }
     
@@ -150,7 +151,9 @@ class ModifierKeyMonitor {
                 let monitor = Unmanaged<ModifierKeyMonitor>.fromOpaque(refcon).takeUnretainedValue()
                 
                 if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
-                    monitor.reenableTap()
+                    if !monitor.reenableTap() {
+                        monitor.reportFailure()
+                    }
                     return Unmanaged.passUnretained(event)
                 }
                 
@@ -194,13 +197,23 @@ class ModifierKeyMonitor {
         eventTap = nil
         runLoopSource = nil
         isModifierPressed = false
+        onFailure = nil
         print("ModifierKeyMonitor: Stopped")
     }
     
-    fileprivate func reenableTap() {
-        if let tap = eventTap {
-            CGEvent.tapEnable(tap: tap, enable: true)
-            print("ModifierKeyMonitor: Re-enabled tap after timeout")
+    fileprivate func reenableTap() -> Bool {
+        guard let tap = eventTap else { return false }
+        CGEvent.tapEnable(tap: tap, enable: true)
+        guard CGEvent.tapIsEnabled(tap: tap) else { return false }
+        print("ModifierKeyMonitor: Re-enabled tap after timeout")
+        return true
+    }
+
+    private func reportFailure() {
+        let failure = onFailure
+        stop()
+        DispatchQueue.main.async {
+            failure?()
         }
     }
     
