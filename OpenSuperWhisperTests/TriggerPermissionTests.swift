@@ -37,7 +37,7 @@ private final class MockPermissionSystem {
 
 @MainActor
 final class TriggerPermissionTests: XCTestCase {
-    func testPermissionAbsentKeepsRegularShortcutAvailableWithoutPrompt() async {
+    func testPermissionAbsentKeepsRegularShortcutAndTranscriptionAvailableWithoutPrompt() async throws {
         let system = MockPermissionSystem()
         system.inputDecision = .denied
         let manager = makeManager(system)
@@ -55,6 +55,15 @@ final class TriggerPermissionTests: XCTestCase {
             ),
             .keyCombination
         )
+
+        let service = TranscriptionService(engine: NamedTestEngine("transcription available"))
+        let text = try await service.transcribeAudio(
+            url: URL(fileURLWithPath: "/unused.wav"),
+            settings: Settings()
+        )
+
+        XCTAssertEqual(text, "transcription available")
+        XCTAssertEqual(system.inputRequestCount, 0)
     }
 
     func testEnablingModifierTriggerRequestsInputMonitoringOnce() async {

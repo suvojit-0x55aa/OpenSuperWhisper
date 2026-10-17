@@ -319,16 +319,22 @@ struct ContentView: View {
 
     private var currentShortcutDescription: String {
         let mouseButton = MouseButton(rawValue: AppPreferences.shared.mouseButtonHotkey) ?? .none
-        if mouseButton != .none {
-            return mouseButton.shortSymbol
-        }
         let modifierKey = ModifierKey(rawValue: AppPreferences.shared.modifierOnlyHotkey) ?? .none
-        if modifierKey != .none {
+        let trigger = ShortcutManager.resolveRecordingTrigger(
+            modifierKey: modifierKey,
+            mouseButton: mouseButton,
+            accessibilityGranted: permissionsManager.isAccessibilityPermissionGranted,
+            inputMonitoringState: permissionsManager.inputMonitoringPermissionState
+        )
+
+        switch trigger {
+        case .mouseButton(let mouseButton):
+            return mouseButton.shortSymbol
+        case .modifier(let modifierKey):
             return modifierKey.shortSymbol
-        } else if let shortcut = KeyboardShortcuts.getShortcut(for: .toggleRecord) {
-            return shortcut.description
+        case .keyCombination:
+            return KeyboardShortcuts.getShortcut(for: .toggleRecord)?.description ?? ""
         }
-        return ""
     }
     
     private func performSearch(_ query: String) {
