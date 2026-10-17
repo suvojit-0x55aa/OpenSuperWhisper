@@ -53,16 +53,21 @@ class MouseButtonMonitor {
     private var runLoopSource: CFRunLoopSource?
     private var selectedMouseButton: MouseButton = .none
     private var isButtonPressed = false
+    private var deliveryGeneration = 0
 
     var onButtonDown: (() -> Void)?
     var onButtonUp: (() -> Void)?
+    var onFailure: (() -> Void)?
 
-    private init() {}
+    init(mouseButton: MouseButton = .none) {
+        selectedMouseButton = mouseButton
+    }
 
-    func start(mouseButton: MouseButton) {
+    @discardableResult
+    func start(mouseButton: MouseButton) -> Bool {
         guard mouseButton != .none else {
             stop()
-            return
+            return false
         }
 
         stop()
@@ -91,7 +96,7 @@ class MouseButtonMonitor {
                 let monitor = Unmanaged<MouseButtonMonitor>.fromOpaque(refcon).takeUnretainedValue()
 
                 if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
-                    monitor.reenableTap()
+                    monitor.handleTapDisabled(reenable: monitor.reenableTap)
                     return Unmanaged.passUnretained(event)
                 }
 
@@ -104,20 +109,32 @@ class MouseButtonMonitor {
             userInfo: Unmanaged.passUnretained(self).toOpaque()
         ) else {
             print("MouseButtonMonitor: Failed to create event tap. Check accessibility permissions.")
-            return
+            return false
         }
 
         eventTap = tap
         runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
 
-        if let source = runLoopSource {
-            CFRunLoopAddSource(CFRunLoopGetCurrent(), source, .commonModes)
-            CGEvent.tapEnable(tap: tap, enable: true)
-            print("MouseButtonMonitor: Started monitoring for \(mouseButton.displayName)")
+        guard let source = runLoopSource else {
+            stop()
+            print("MouseButtonMonitor: Failed to create event tap run loop source.")
+            return false
         }
+
+        CFRunLoopAddSource(CFRunLoopGetCurrent(), source, .commonModes)
+        CGEvent.tapEnable(tap: tap, enable: true)
+        guard CGEvent.tapIsEnabled(tap: tap) else {
+            stop()
+            print("MouseButtonMonitor: Event tap could not be enabled.")
+            return false
+        }
+
+        print("MouseButtonMonitor: Started monitoring for \(mouseButton.displayName)")
+        return true
     }
 
     func stop() {
+        deliveryGeneration += 1
         if let tap = eventTap {
             CGEvent.tapEnable(tap: tap, enable: false)
             if let source = runLoopSource {
@@ -127,18 +144,32 @@ class MouseButtonMonitor {
         eventTap = nil
         runLoopSource = nil
         isButtonPressed = false
+        onFailure = nil
         print("MouseButtonMonitor: Stopped")
     }
 
-    fileprivate func reenableTap() {
-        if let tap = eventTap {
-            CGEvent.tapEnable(tap: tap, enable: true)
-            print("MouseButtonMonitor: Re-enabled tap after timeout")
+    func handleTapDisabled(reenable: () -> Bool) {
+        if !reenable() {
+            reportFailure()
         }
     }
 
+    fileprivate func reenableTap() -> Bool {
+        guard let tap = eventTap else { return false }
+        CGEvent.tapEnable(tap: tap, enable: true)
+        guard CGEvent.tapIsEnabled(tap: tap) else { return false }
+        print("MouseButtonMonitor: Re-enabled tap after timeout")
+        return true
+    }
+
+    private func reportFailure() {
+        let failure = onFailure
+        failure?()
+        stop()
+    }
+
     /// Returns `true` when the event belongs to the bound button and should be consumed.
-    private func handleMouseEvent(type: CGEventType, event: CGEvent) -> Bool {
+    func handleMouseEvent(type: CGEventType, event: CGEvent) -> Bool {
         let buttonNumber = event.getIntegerValueField(.mouseEventButtonNumber)
         guard buttonNumber == selectedMouseButton.buttonNumber else { return false }
 
@@ -146,21 +177,29 @@ class MouseButtonMonitor {
         case .otherMouseDown:
             if !isButtonPressed {
                 isButtonPressed = true
-                DispatchQueue.main.async {
-                    self.onButtonDown?()
+                enqueueDelivery { monitor in
+                    monitor.onButtonDown?()
                 }
             }
         case .otherMouseUp:
             if isButtonPressed {
                 isButtonPressed = false
-                DispatchQueue.main.async {
-                    self.onButtonUp?()
+                enqueueDelivery { monitor in
+                    monitor.onButtonUp?()
                 }
             }
         default:
             return false
         }
         return true
+    }
+
+    private func enqueueDelivery(_ delivery: @escaping (MouseButtonMonitor) -> Void) {
+        let generation = deliveryGeneration
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.deliveryGeneration == generation else { return }
+            delivery(self)
+        }
     }
 
     deinit {

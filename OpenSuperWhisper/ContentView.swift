@@ -309,7 +309,8 @@ class ContentViewModel: ObservableObject {
 struct ContentView: View {
     @ObservedObject private var errors = AppErrorCenter.shared
     @StateObject private var viewModel = ContentViewModel()
-    @StateObject private var permissionsManager = PermissionsManager()
+    @ObservedObject private var permissionsManager = PermissionsManager.shared
+    @ObservedObject private var shortcutManager = ShortcutManager.shared
     @Environment(\.colorScheme) private var colorScheme
     @State private var isSettingsPresented = false
     @State private var searchText = ""
@@ -317,18 +318,21 @@ struct ContentView: View {
     @State private var showDeleteConfirmation = false
     @State private var searchTask: Task<Void, Never>? = nil
 
-    private var currentShortcutDescription: String {
-        let mouseButton = MouseButton(rawValue: AppPreferences.shared.mouseButtonHotkey) ?? .none
-        if mouseButton != .none {
+    private var currentRecordingTrigger: RecordingTrigger {
+        shortcutManager.activeRecordingTrigger
+    }
+
+    private var currentShortcutDescription: String? {
+        switch currentRecordingTrigger {
+        case .mouseButton(let mouseButton):
             return mouseButton.shortSymbol
-        }
-        let modifierKey = ModifierKey(rawValue: AppPreferences.shared.modifierOnlyHotkey) ?? .none
-        if modifierKey != .none {
+        case .modifier(let modifierKey):
             return modifierKey.shortSymbol
-        } else if let shortcut = KeyboardShortcuts.getShortcut(for: .toggleRecord) {
-            return shortcut.description
+        case .keyCombination:
+            return KeyboardShortcuts.getShortcut(for: .toggleRecord)?.description
+        case .unavailable:
+            return nil
         }
-        return ""
     }
     
     private func performSearch(_ query: String) {
@@ -539,15 +543,30 @@ struct ContentView: View {
                         HStack(alignment: .bottom) {
                             VStack(alignment: .leading, spacing: 8) {
                                 // Подсказка о шорткате
-                                HStack(spacing: 6) {
-                                    Text(currentShortcutDescription)
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
-                                    Text("to show mini recorder")
-                                        .font(.caption)
-                                        .foregroundColor(.secondary)
+                                if let shortcutDescription = currentShortcutDescription {
+                                    HStack(spacing: 6) {
+                                        Text(shortcutDescription)
+                                            .font(.caption)
+                                            .foregroundColor(.secondary)
+                                        Text("to show mini recorder")
+                                            .font(.caption)
+                                            .foregroundColor(.secondary)
+                                    }
+                                    .padding(.leading, 4)
+                                } else {
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text("No global trigger active.")
+                                            .font(.caption)
+                                            .foregroundColor(.secondary)
+                                        Button("Configure Key Combination in Settings") {
+                                            isSettingsPresented = true
+                                        }
+                                        .buttonStyle(.link)
+                                        .controlSize(.small)
+                                        .help("Open shortcut settings")
+                                    }
+                                    .padding(.leading, 4)
                                 }
-                                .padding(.leading, 4)
 
                                 // Подсказка о drag-n-drop
                                 HStack(spacing: 6) {
@@ -721,7 +740,7 @@ struct PermissionsView: View {
             PermissionRow(
                 isGranted: permissionsManager.isAccessibilityPermissionGranted,
                 title: "Accessibility Access",
-                description: "Required for global keyboard shortcuts",
+                description: "Used for automatic paste, indicator placement, and mouse-button triggers",
                 action: { permissionsManager.openSystemPreferences(for: .accessibility) }
             )
 

@@ -117,16 +117,19 @@ class ModifierKeyMonitor {
     private var runLoopSource: CFRunLoopSource?
     private var selectedModifierKey: ModifierKey = .none
     private var isModifierPressed = false
+    private var deliveryGeneration = 0
     
     var onKeyDown: (() -> Void)?
     var onKeyUp: (() -> Void)?
+    var onFailure: (() -> Void)?
     
     init(modifierKey: ModifierKey = .none) { selectedModifierKey = modifierKey }
     
-    func start(modifierKey: ModifierKey) {
+    @discardableResult
+    func start(modifierKey: ModifierKey) -> Bool {
         guard modifierKey != .none else {
             stop()
-            return
+            return false
         }
         
         stop()
@@ -149,7 +152,7 @@ class ModifierKeyMonitor {
                 let monitor = Unmanaged<ModifierKeyMonitor>.fromOpaque(refcon).takeUnretainedValue()
                 
                 if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
-                    monitor.reenableTap()
+                    monitor.handleTapDisabled(reenable: monitor.reenableTap)
                     return Unmanaged.passUnretained(event)
                 }
                 
@@ -158,21 +161,33 @@ class ModifierKeyMonitor {
             },
             userInfo: Unmanaged.passUnretained(self).toOpaque()
         ) else {
-            print("ModifierKeyMonitor: Failed to create event tap. Check accessibility permissions.")
-            return
+            print("ModifierKeyMonitor: Failed to create event tap. Check Input Monitoring permission.")
+            return false
         }
         
         eventTap = tap
         runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
-        
-        if let source = runLoopSource {
-            CFRunLoopAddSource(CFRunLoopGetCurrent(), source, .commonModes)
-            CGEvent.tapEnable(tap: tap, enable: true)
-            print("ModifierKeyMonitor: Started monitoring for \(modifierKey.displayName)")
+
+        guard let source = runLoopSource else {
+            stop()
+            print("ModifierKeyMonitor: Failed to create event tap run loop source.")
+            return false
         }
+
+        CFRunLoopAddSource(CFRunLoopGetCurrent(), source, .commonModes)
+        CGEvent.tapEnable(tap: tap, enable: true)
+        guard CGEvent.tapIsEnabled(tap: tap) else {
+            stop()
+            print("ModifierKeyMonitor: Event tap could not be enabled.")
+            return false
+        }
+
+        print("ModifierKeyMonitor: Started monitoring for \(modifierKey.displayName)")
+        return true
     }
     
     func stop() {
+        deliveryGeneration += 1
         if let tap = eventTap {
             CGEvent.tapEnable(tap: tap, enable: false)
             if let source = runLoopSource {
@@ -182,16 +197,30 @@ class ModifierKeyMonitor {
         eventTap = nil
         runLoopSource = nil
         isModifierPressed = false
+        onFailure = nil
         print("ModifierKeyMonitor: Stopped")
     }
-    
-    fileprivate func reenableTap() {
-        if let tap = eventTap {
-            CGEvent.tapEnable(tap: tap, enable: true)
-            print("ModifierKeyMonitor: Re-enabled tap after timeout")
+
+    func handleTapDisabled(reenable: () -> Bool) {
+        if !reenable() {
+            reportFailure()
         }
     }
     
+    fileprivate func reenableTap() -> Bool {
+        guard let tap = eventTap else { return false }
+        CGEvent.tapEnable(tap: tap, enable: true)
+        guard CGEvent.tapIsEnabled(tap: tap) else { return false }
+        print("ModifierKeyMonitor: Re-enabled tap after timeout")
+        return true
+    }
+
+    private func reportFailure() {
+        let failure = onFailure
+        failure?()
+        stop()
+    }
+
     func handleFlagsChanged(event: CGEvent) {
         let keyCode = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
         let flags = event.flags
@@ -203,14 +232,22 @@ class ModifierKeyMonitor {
         
         if isPressed && !isModifierPressed {
             isModifierPressed = true
-            DispatchQueue.main.async {
-                self.onKeyDown?()
+            enqueueDelivery { monitor in
+                monitor.onKeyDown?()
             }
         } else if !isPressed && isModifierPressed {
             isModifierPressed = false
-            DispatchQueue.main.async {
-                self.onKeyUp?()
+            enqueueDelivery { monitor in
+                monitor.onKeyUp?()
             }
+        }
+    }
+
+    private func enqueueDelivery(_ delivery: @escaping (ModifierKeyMonitor) -> Void) {
+        let generation = deliveryGeneration
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.deliveryGeneration == generation else { return }
+            delivery(self)
         }
     }
     

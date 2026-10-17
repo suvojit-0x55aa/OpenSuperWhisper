@@ -739,7 +739,7 @@ struct Settings {
 
 struct SettingsView: View {
     @StateObject private var viewModel = SettingsViewModel()
-    @StateObject private var permissionsManager = PermissionsManager()
+    @ObservedObject private var permissionsManager = PermissionsManager.shared
     @Environment(\.dismiss) var dismiss
     @State private var isRecordingNewShortcut = false
     @State private var selectedTab = 0
@@ -1378,6 +1378,7 @@ struct SettingsView: View {
                                         viewModel.modifierOnlyHotkey =
                                             ModifierKey(rawValue: AppPreferences.shared.lastModifierOnlyHotkey) ?? .leftCommand
                                     }
+                                    permissionsManager.requestInputMonitoringPermissionIfNeeded()
                                 case .mouse:
                                     viewModel.modifierOnlyHotkey = .none
                                     if viewModel.mouseButtonHotkey == .none {
@@ -1416,12 +1417,7 @@ struct SettingsView: View {
                                     .font(.caption)
                                     .foregroundColor(.secondary)
 
-                                permissionWarning(
-                                    message: "⚠️ This mode requires Input Monitoring permission. macOS requires this to detect single modifier key presses globally. Only modifier key events (⌘, ⌥, ⇧, ⌃, Fn) are monitored — no regular keystrokes are captured.",
-                                    isGranted: permissionsManager.isInputMonitoringPermissionGranted
-                                ) {
-                                    permissionsManager.requestInputMonitoringPermissionOrOpenSystemPreferences()
-                                }
+                                InputMonitoringPermissionNotice(permissionsManager: permissionsManager)
                             }
                         case .mouse:
                             VStack(alignment: .leading, spacing: 8) {
@@ -1459,7 +1455,12 @@ struct SettingsView: View {
                                     Text("Shortcut")
                                         .font(.subheadline)
                                     Spacer()
-                                    KeyboardShortcuts.Recorder("", name: .toggleRecord)
+                                    KeyboardShortcuts.Recorder("", name: .toggleRecord) { _ in
+                                        NotificationCenter.default.post(
+                                            name: .hotkeySettingsChanged,
+                                            object: nil
+                                        )
+                                    }
                                         .frame(width: 150)
                                 }
                                 .padding(.horizontal, 12)

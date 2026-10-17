@@ -420,6 +420,7 @@ class OnboardingViewModel: ObservableObject {
 
 struct OnboardingView: View {
     @StateObject private var viewModel = OnboardingViewModel()
+    @ObservedObject private var permissionsManager = PermissionsManager.shared
     @EnvironmentObject private var appState: AppState
     @State private var showError = false
     @State private var errorMessage = ""
@@ -513,13 +514,12 @@ struct OnboardingView: View {
                                 isSelected: viewModel.selectedShortcut == .rightOption
                             ) {
                                 viewModel.selectedShortcut = .rightOption
+                                permissionsManager.requestInputMonitoringPermissionIfNeeded()
                             }
                         }
                         
                         if viewModel.selectedShortcut == .rightOption {
-                            Text("⚠️ Single modifier key mode requires Input Monitoring permission (macOS needs it to detect modifier keys globally). Only modifier key events are monitored — no regular keystrokes.")
-                                .font(.caption2)
-                                .foregroundColor(.orange)
+                            InputMonitoringPermissionNotice(permissionsManager: permissionsManager)
                         }
 
                         Text("You can change this later in Settings")

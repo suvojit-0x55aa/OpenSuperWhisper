@@ -12,31 +12,66 @@ extension KeyboardShortcuts.Name {
     static let escape = Self("escape", initial: .init(.escape))
 }
 
+enum RecordingTrigger: Equatable {
+    case keyCombination
+    case modifier(ModifierKey)
+    case mouseButton(MouseButton)
+    case unavailable
+}
+
+struct TriggerPermissionSnapshot: Equatable {
+    let accessibilityGranted: Bool
+    let inputMonitoringState: InputMonitoringPermissionState
+}
+
 @MainActor
-class ShortcutManager {
+class ShortcutManager: ObservableObject {
     static let shared = ShortcutManager()
 
+    @Published private(set) var activeRecordingTrigger: RecordingTrigger = .unavailable
     private var triggerPermissions: PermissionsManager?
     private var permissionSubscription: AnyCancellable?
     private var activeVm: IndicatorViewModel?
     private var holdWorkItem: DispatchWorkItem?
     private let holdThreshold: TimeInterval = 0.3
-    private var holdMode = false
-    private var useModifierOnlyHotkey = false
-    private var useMouseButtonHotkey = false
+    private(set) var holdMode = false
+    private var holdGeneration = 0
+    private var triggerGeneration = 0
+    private let holdToRecordEnabled: () -> Bool
+    private let stopHoldRecording: () -> Void
 
-    init(registerShortcuts: Bool = true) {
+    init(
+        registerShortcuts: Bool = true,
+        holdToRecordEnabled: @escaping () -> Bool = { AppPreferences.shared.holdToRecord },
+        stopHoldRecording: (() -> Void)? = nil
+    ) {
+        self.holdToRecordEnabled = holdToRecordEnabled
+        self.stopHoldRecording = stopHoldRecording ?? {
+            IndicatorWindowManager.shared.stopRecording()
+        }
         guard registerShortcuts else { return }
         print("ShortcutManager init")
 
-        setupKeyboardShortcuts()
-        setupRecordingTrigger()
-        let permissions = PermissionsManager()
+        let permissions = PermissionsManager.shared
         triggerPermissions = permissions
+        setupKeyboardShortcuts()
+        let initialPermissionSnapshot = TriggerPermissionSnapshot(
+            accessibilityGranted: permissions.isAccessibilityPermissionGranted,
+            inputMonitoringState: permissions.inputMonitoringPermissionState
+        )
         observeTriggerPermissions(permissions.$isAccessibilityPermissionGranted
-            .combineLatest(permissions.$isInputMonitoringPermissionGranted)
-            .map { ($0 ? 1 : 0) | ($1 ? 2 : 0) }
-            .eraseToAnyPublisher()) { [weak self] in self?.setupRecordingTrigger() }
+            .combineLatest(permissions.$inputMonitoringPermissionState)
+            .map {
+                TriggerPermissionSnapshot(
+                    accessibilityGranted: $0,
+                    inputMonitoringState: $1
+                )
+            }
+            .eraseToAnyPublisher(),
+            initialSnapshot: initialPermissionSnapshot
+        ) { [weak self] snapshot in
+            self?.setupRecordingTrigger(permissionSnapshot: snapshot)
+        }
         
         NotificationCenter.default.addObserver(
             self,
@@ -53,14 +88,23 @@ class ShortcutManager {
         )
     }
     
-    func observeTriggerPermissions(_ publisher: AnyPublisher<Int, Never>, reconfigure: @escaping () -> Void) {
+    func observeTriggerPermissions(
+        _ publisher: AnyPublisher<TriggerPermissionSnapshot, Never>,
+        initialSnapshot: TriggerPermissionSnapshot,
+        reconfigure: @escaping (TriggerPermissionSnapshot) -> Void
+    ) {
         permissionSubscription = publisher
-            .removeDuplicates()
-            .dropFirst()
-            .sink { _ in reconfigure() }
+            .prepend(initialSnapshot)
+            .removeDuplicates { previous, current in
+                previous.accessibilityGranted == current.accessibilityGranted
+                    && (previous.inputMonitoringState == .granted)
+                    == (current.inputMonitoringState == .granted)
+            }
+            .sink(receiveValue: reconfigure)
     }
 
     @objc private func indicatorWindowDidHide() {
+        cancelPendingHold()
         activeVm = nil
         holdMode = false
     }
@@ -92,21 +136,30 @@ class ShortcutManager {
         }
     }
 
-    private func setupRecordingTrigger() {
+    private func setupRecordingTrigger(permissionSnapshot: TriggerPermissionSnapshot? = nil) {
         let modifierKey = ModifierKey(rawValue: AppPreferences.shared.modifierOnlyHotkey) ?? .none
         let mouseButton = MouseButton(rawValue: AppPreferences.shared.mouseButtonHotkey) ?? .none
+        let permissions = triggerPermissions ?? PermissionsManager.shared
+        let permissionSnapshot = permissionSnapshot ?? TriggerPermissionSnapshot(
+            accessibilityGranted: permissions.isAccessibilityPermissionGranted,
+            inputMonitoringState: permissions.inputMonitoringPermissionState
+        )
+        let keyCombinationAssigned = KeyboardShortcuts.getShortcut(for: .toggleRecord) != nil
+        let trigger = Self.resolveRecordingTrigger(
+            modifierKey: modifierKey,
+            mouseButton: mouseButton,
+            accessibilityGranted: permissionSnapshot.accessibilityGranted,
+            inputMonitoringState: permissionSnapshot.inputMonitoringState,
+            keyCombinationAssigned: keyCombinationAssigned
+        )
 
-        // The three trigger modes are mutually exclusive. Tear all of them down
-        // first, then enable exactly one. A configured mouse button takes priority
-        // over a modifier key, which takes priority over the regular shortcut.
-        ModifierKeyMonitor.shared.stop()
-        MouseButtonMonitor.shared.stop()
+        prepareForTriggerReplacement {
+            ModifierKeyMonitor.shared.stop()
+            MouseButtonMonitor.shared.stop()
+        }
 
-        if mouseButton != .none {
-            useMouseButtonHotkey = true
-            useModifierOnlyHotkey = false
-            KeyboardShortcuts.disable(.toggleRecord)
-
+        switch trigger {
+        case .mouseButton(let button):
             MouseButtonMonitor.shared.onButtonDown = { [weak self] in
                 self?.handleKeyDown()
             }
@@ -115,13 +168,26 @@ class ShortcutManager {
                 self?.handleKeyUp()
             }
 
-            MouseButtonMonitor.shared.start(mouseButton: mouseButton)
-            print("ShortcutManager: Using mouse-button hotkey: \(mouseButton.displayName)")
-        } else if modifierKey != .none {
-            useMouseButtonHotkey = false
-            useModifierOnlyHotkey = true
-            KeyboardShortcuts.disable(.toggleRecord)
-
+            let activeTrigger = activateEventTapTrigger(
+                .mouseButton(button),
+                keyCombinationAssigned: {
+                    KeyboardShortcuts.getShortcut(for: .toggleRecord) != nil
+                },
+                startMonitor: { onFailure in
+                    let started = MouseButtonMonitor.shared.start(mouseButton: button)
+                    MouseButtonMonitor.shared.onFailure = started ? onFailure : nil
+                    return started
+                },
+                setKeyCombinationEnabled: Self.setKeyCombinationEnabled
+            )
+            if activeTrigger == .mouseButton(button) {
+                print("ShortcutManager: Using mouse-button hotkey: \(button.displayName)")
+            } else if activeTrigger == .keyCombination {
+                print("ShortcutManager: Mouse monitor unavailable; using regular shortcut fallback")
+            } else {
+                print("ShortcutManager: Mouse monitor unavailable; no global recording trigger is assigned")
+            }
+        case .modifier(let modifier):
             ModifierKeyMonitor.shared.onKeyDown = { [weak self] in
                 self?.handleKeyDown()
             }
@@ -130,18 +196,113 @@ class ShortcutManager {
                 self?.handleKeyUp()
             }
 
-            ModifierKeyMonitor.shared.start(modifierKey: modifierKey)
-            print("ShortcutManager: Using modifier-only hotkey: \(modifierKey.displayName)")
-        } else {
-            useMouseButtonHotkey = false
-            useModifierOnlyHotkey = false
+            let activeTrigger = activateEventTapTrigger(
+                .modifier(modifier),
+                keyCombinationAssigned: {
+                    KeyboardShortcuts.getShortcut(for: .toggleRecord) != nil
+                },
+                startMonitor: { onFailure in
+                    let started = ModifierKeyMonitor.shared.start(modifierKey: modifier)
+                    ModifierKeyMonitor.shared.onFailure = started ? onFailure : nil
+                    return started
+                },
+                setKeyCombinationEnabled: Self.setKeyCombinationEnabled
+            )
+            if activeTrigger == .modifier(modifier) {
+                print("ShortcutManager: Using modifier-only hotkey: \(modifier.displayName)")
+            } else if activeTrigger == .keyCombination {
+                print("ShortcutManager: Modifier monitor unavailable; using regular shortcut fallback")
+            } else {
+                print("ShortcutManager: Modifier monitor unavailable; no global recording trigger is assigned")
+            }
+        case .keyCombination:
             KeyboardShortcuts.enable(.toggleRecord)
+            activeRecordingTrigger = .keyCombination
             print("ShortcutManager: Using regular keyboard shortcut")
+        case .unavailable:
+            KeyboardShortcuts.enable(.toggleRecord)
+            activeRecordingTrigger = .unavailable
+            print("ShortcutManager: No global recording trigger is available")
         }
+    }
+
+    func prepareForTriggerReplacement(stopMonitors: () -> Void) {
+        handleKeyUp()
+        triggerGeneration += 1
+        stopMonitors()
+    }
+
+    @discardableResult
+    func activateEventTapTrigger(
+        _ requestedTrigger: RecordingTrigger,
+        keyCombinationAssigned: @escaping () -> Bool,
+        startMonitor: (_ onFailure: @escaping () -> Void) -> Bool,
+        setKeyCombinationEnabled: @escaping (Bool) -> Void
+    ) -> RecordingTrigger {
+        let generation = triggerGeneration
+        let onFailure = { [weak self] in
+            guard let self,
+                  self.triggerGeneration == generation,
+                  self.activeRecordingTrigger == requestedTrigger else { return }
+            self.publishFallback(
+                keyCombinationAssigned: keyCombinationAssigned(),
+                setKeyCombinationEnabled: setKeyCombinationEnabled
+            )
+        }
+        let trigger: RecordingTrigger
+        if startMonitor(onFailure) {
+            setKeyCombinationEnabled(false)
+            trigger = requestedTrigger
+        } else {
+            return publishFallback(
+                keyCombinationAssigned: keyCombinationAssigned(),
+                setKeyCombinationEnabled: setKeyCombinationEnabled
+            )
+        }
+        activeRecordingTrigger = trigger
+        return trigger
+    }
+
+    @discardableResult
+    private func publishFallback(
+        keyCombinationAssigned: Bool,
+        setKeyCombinationEnabled: (Bool) -> Void
+    ) -> RecordingTrigger {
+        handleKeyUp()
+        setKeyCombinationEnabled(true)
+        let trigger: RecordingTrigger = keyCombinationAssigned ? .keyCombination : .unavailable
+        activeRecordingTrigger = trigger
+        return trigger
+    }
+
+    private static func setKeyCombinationEnabled(_ enabled: Bool) {
+        if enabled {
+            KeyboardShortcuts.enable(.toggleRecord)
+        } else {
+            KeyboardShortcuts.disable(.toggleRecord)
+        }
+    }
+
+    static func resolveRecordingTrigger(
+        modifierKey: ModifierKey,
+        mouseButton: MouseButton,
+        accessibilityGranted: Bool,
+        inputMonitoringState: InputMonitoringPermissionState,
+        keyCombinationAssigned: Bool
+    ) -> RecordingTrigger {
+        if mouseButton != .none, accessibilityGranted {
+            return .mouseButton(mouseButton)
+        }
+        if mouseButton == .none,
+           modifierKey != .none,
+           inputMonitoringState == .granted {
+            return .modifier(modifierKey)
+        }
+        return keyCombinationAssigned ? .keyCombination : .unavailable
     }
     
     private func handleKeyDown() {
-        holdWorkItem?.cancel()
+        cancelPendingHold()
         holdMode = false
         
         let session = RecordingSessionController.shared
@@ -159,11 +320,24 @@ class ShortcutManager {
             let point = FocusUtils.chooseIndicatorPoint(resolvedInputAnchor: anchorPoint, cursorPosition: cursorPosition)
             IndicatorWindowManager.shared.presentWindow(for: vm, nearPoint: point)
         }
-        if AppPreferences.shared.holdToRecord && session.isCapturing {
-            let workItem = DispatchWorkItem { [weak self] in self?.holdMode = true }
-            holdWorkItem = workItem
-            DispatchQueue.main.asyncAfter(deadline: .now() + holdThreshold, execute: workItem)
+        if holdToRecordEnabled() && session.isCapturing {
+            scheduleHoldActivation()
         }
+    }
+
+    func scheduleHoldActivation(after delay: TimeInterval? = nil) {
+        cancelPendingHold()
+        let generation = holdGeneration
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self, self.holdGeneration == generation else { return }
+            self.holdMode = true
+            self.holdWorkItem = nil
+        }
+        holdWorkItem = workItem
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + (delay ?? holdThreshold),
+            execute: workItem
+        )
     }
 
     /// Resolves the input anchor without letting a slow focused app delay the
@@ -198,16 +372,17 @@ class ShortcutManager {
     }
     
     private func handleKeyUp() {
+        cancelPendingHold()
+
+        if holdMode {
+            stopHoldRecording()
+        }
+        holdMode = false
+    }
+
+    private func cancelPendingHold() {
+        holdGeneration += 1
         holdWorkItem?.cancel()
         holdWorkItem = nil
-        
-        let holdToRecordEnabled = AppPreferences.shared.holdToRecord
-        
-        Task { @MainActor in
-            if holdToRecordEnabled && self.holdMode && self.activeVm != nil {
-                IndicatorWindowManager.shared.stopRecording()
-            }
-            self.holdMode = false
-        }
     }
 }

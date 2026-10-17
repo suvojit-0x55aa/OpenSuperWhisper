@@ -1,22 +1,578 @@
-import XCTest
+import AVFoundation
 import Combine
+import CoreGraphics
+import XCTest
 @testable import OpenSuperWhisper
+
+private final class MockPermissionSystem {
+    var microphoneStatus: AVAuthorizationStatus = .notDetermined
+    var microphoneRequestResult = false
+    var microphoneRequestCount = 0
+    var accessibilityTrusted = false
+    var inputDecision: InputMonitoringDecision = .notDetermined
+    var inputPreflightGranted = false
+    var inputRequestResult = false
+    var inputRequestCount = 0
+    var onInputRequest: (() -> Void)?
+    var onOpenSystemSettings: ((URL) -> Void)?
+
+    func makeClient() -> PermissionClient {
+        PermissionClient(
+            microphoneAuthorizationStatus: { self.microphoneStatus },
+            requestMicrophoneAccess: { completion in
+                self.microphoneRequestCount += 1
+                completion(self.microphoneRequestResult)
+            },
+            isAccessibilityTrusted: { self.accessibilityTrusted },
+            inputMonitoringDecision: { self.inputDecision },
+            preflightInputMonitoringAccess: { self.inputPreflightGranted },
+            requestInputMonitoringAccess: {
+                self.inputRequestCount += 1
+                self.onInputRequest?()
+                return self.inputRequestResult
+            },
+            openSystemSettings: { self.onOpenSystemSettings?($0) }
+        )
+    }
+}
 
 @MainActor
 final class TriggerPermissionTests: XCTestCase {
-    func testPermissionGrantAndRevocationReconfigureTriggerOnce() {
-        let permissions = CurrentValueSubject<Int, Never>(0)
+    func testPermissionAbsentKeepsRegularShortcutAndTranscriptionAvailableWithoutPrompt() async throws {
+        let system = MockPermissionSystem()
+        system.inputDecision = .denied
+        let manager = makeManager(system)
+
+        await refresh(manager)
+
+        XCTAssertEqual(system.inputRequestCount, 0)
+        XCTAssertEqual(manager.inputMonitoringPermissionState, .denied)
+        XCTAssertEqual(
+            ShortcutManager.resolveRecordingTrigger(
+                modifierKey: .rightOption,
+                mouseButton: .none,
+                accessibilityGranted: false,
+                inputMonitoringState: manager.inputMonitoringPermissionState,
+                keyCombinationAssigned: true
+            ),
+            .keyCombination
+        )
+
+        let service = TranscriptionService(engine: NamedTestEngine("transcription available"))
+        let text = try await service.transcribeAudio(
+            url: URL(fileURLWithPath: "/unused.wav"),
+            settings: Settings()
+        )
+
+        XCTAssertEqual(text, "transcription available")
+        XCTAssertEqual(system.inputRequestCount, 0)
+    }
+
+    func testEnablingModifierTriggerRequestsInputMonitoringOnce() async {
+        let system = MockPermissionSystem()
+        system.inputRequestResult = false
+        system.onInputRequest = { system.inputDecision = .denied }
+        let manager = makeManager(system)
+
+        let denied = expectation(description: "denied")
+        let cancellable = manager.$inputMonitoringPermissionState
+            .filter { $0 == .denied }
+            .sink { _ in denied.fulfill() }
+
+        manager.requestInputMonitoringPermissionIfNeeded()
+        manager.requestInputMonitoringPermissionIfNeeded()
+        await fulfillment(of: [denied], timeout: 1)
+        manager.requestInputMonitoringPermissionIfNeeded()
+
+        XCTAssertEqual(system.inputRequestCount, 1)
+        withExtendedLifetime(cancellable) {}
+    }
+
+    func testInputMonitoringGrantBecomesActive() async {
+        let system = MockPermissionSystem()
+        system.inputRequestResult = true
+        system.onInputRequest = {
+            system.inputDecision = .granted
+            system.inputPreflightGranted = true
+        }
+        let manager = makeManager(system)
+
+        await requestInputMonitoring(manager, expecting: .granted)
+
+        XCTAssertTrue(manager.isInputMonitoringPermissionGranted)
+        XCTAssertEqual(system.inputRequestCount, 1)
+    }
+
+    func testInputMonitoringDenialUsesInputMonitoringSettingsRecovery() async {
+        let system = MockPermissionSystem()
+        system.inputRequestResult = false
+        system.onInputRequest = { system.inputDecision = .denied }
+        let manager = makeManager(system)
+        await requestInputMonitoring(manager, expecting: .denied)
+
+        let opened = expectation(description: "settings opened")
+        system.onOpenSystemSettings = { url in
+            XCTAssertEqual(url, Permission.inputMonitoring.systemSettingsURL)
+            XCTAssertTrue(url.absoluteString.contains("Privacy_ListenEvent"))
+            opened.fulfill()
+        }
+        manager.requestInputMonitoringPermissionOrOpenSystemPreferences()
+        await fulfillment(of: [opened], timeout: 1)
+
+        XCTAssertEqual(system.inputRequestCount, 1)
+    }
+
+    func testInputMonitoringGrantReportsRestartRequiredUntilFreshProcessPreflight() async {
+        let system = MockPermissionSystem()
+        system.inputRequestResult = true
+        system.onInputRequest = {
+            system.inputDecision = .granted
+            system.inputPreflightGranted = false
+        }
+        let manager = makeManager(system)
+
+        await requestInputMonitoring(manager, expecting: .restartRequired)
+        XCTAssertFalse(manager.isInputMonitoringPermissionGranted)
+
+        system.inputPreflightGranted = true
+        let relaunchedManager = makeManager(system)
+        await refresh(relaunchedManager)
+        XCTAssertEqual(relaunchedManager.inputMonitoringPermissionState, .granted)
+    }
+
+    func testAccessibilityAndMicrophoneChecksRemainIndependent() async {
+        let firstSystem = MockPermissionSystem()
+        firstSystem.microphoneStatus = .authorized
+        firstSystem.accessibilityTrusted = false
+        firstSystem.inputDecision = .denied
+        let firstManager = makeManager(firstSystem)
+        await refresh(firstManager)
+
+        XCTAssertTrue(firstManager.isMicrophonePermissionGranted)
+        XCTAssertFalse(firstManager.isAccessibilityPermissionGranted)
+        XCTAssertEqual(firstManager.inputMonitoringPermissionState, .denied)
+
+        let secondSystem = MockPermissionSystem()
+        secondSystem.microphoneStatus = .denied
+        secondSystem.accessibilityTrusted = true
+        secondSystem.inputDecision = .granted
+        secondSystem.inputPreflightGranted = true
+        let secondManager = makeManager(secondSystem)
+        await refresh(secondManager)
+
+        XCTAssertFalse(secondManager.isMicrophonePermissionGranted)
+        XCTAssertTrue(secondManager.isAccessibilityPermissionGranted)
+        XCTAssertEqual(secondManager.inputMonitoringPermissionState, .granted)
+
+        XCTAssertEqual(
+            ShortcutManager.resolveRecordingTrigger(
+                modifierKey: .rightOption,
+                mouseButton: .none,
+                accessibilityGranted: false,
+                inputMonitoringState: .granted,
+                keyCombinationAssigned: true
+            ),
+            .modifier(.rightOption)
+        )
+        XCTAssertEqual(
+            ShortcutManager.resolveRecordingTrigger(
+                modifierKey: .rightOption,
+                mouseButton: .none,
+                accessibilityGranted: true,
+                inputMonitoringState: .denied,
+                keyCombinationAssigned: true
+            ),
+            .keyCombination
+        )
+        XCTAssertEqual(
+            ShortcutManager.resolveRecordingTrigger(
+                modifierKey: .none,
+                mouseButton: .middle,
+                accessibilityGranted: true,
+                inputMonitoringState: .denied,
+                keyCombinationAssigned: true
+            ),
+            .mouseButton(.middle)
+        )
+    }
+
+    func testUnavailableModifierWithClearedFallbackReportsNoGlobalTrigger() {
+        XCTAssertEqual(
+            ShortcutManager.resolveRecordingTrigger(
+                modifierKey: .rightOption,
+                mouseButton: .none,
+                accessibilityGranted: false,
+                inputMonitoringState: .denied,
+                keyCombinationAssigned: false
+            ),
+            .unavailable
+        )
+    }
+
+    func testModifierStartupRacePublishesAssignedFallback() {
         let manager = ShortcutManager(registerShortcuts: false)
-        var changes = 0
-        manager.observeTriggerPermissions(permissions.eraseToAnyPublisher()) { changes += 1 }
-        permissions.send(0)
-        XCTAssertEqual(changes, 0)
-        permissions.send(1)
-        permissions.send(1)
-        XCTAssertEqual(changes, 1)
-        permissions.send(3)
-        permissions.send(0)
-        permissions.send(3)
-        XCTAssertEqual(changes, 4)
+        var keyCombinationEnabled = false
+
+        let activeTrigger = manager.activateEventTapTrigger(
+            .modifier(.rightOption),
+            keyCombinationAssigned: { true },
+            startMonitor: { _ in false },
+            setKeyCombinationEnabled: { keyCombinationEnabled = $0 }
+        )
+
+        XCTAssertTrue(keyCombinationEnabled)
+        XCTAssertEqual(activeTrigger, .keyCombination)
+        XCTAssertEqual(manager.activeRecordingTrigger, .keyCombination)
+        XCTAssertEqual(
+            InputMonitoringPermissionNotice.activationDescription(for: activeTrigger),
+            "The regular key combination is active instead."
+        )
+    }
+
+    func testModifierStartupRacePublishesUnavailableWithoutAssignedFallback() {
+        let manager = ShortcutManager(registerShortcuts: false)
+        var keyCombinationEnabled = false
+
+        let activeTrigger = manager.activateEventTapTrigger(
+            .modifier(.rightOption),
+            keyCombinationAssigned: { false },
+            startMonitor: { _ in false },
+            setKeyCombinationEnabled: { keyCombinationEnabled = $0 }
+        )
+
+        XCTAssertTrue(keyCombinationEnabled)
+        XCTAssertEqual(activeTrigger, .unavailable)
+        XCTAssertEqual(manager.activeRecordingTrigger, .unavailable)
+        XCTAssertEqual(
+            InputMonitoringPermissionNotice.activationDescription(for: activeTrigger),
+            "No global trigger is active. Configure a key combination in Shortcuts."
+        )
+    }
+
+    func testMouseStartupRacePublishesAssignedFallback() {
+        let manager = ShortcutManager(registerShortcuts: false)
+        var keyCombinationEnabled = false
+
+        let activeTrigger = manager.activateEventTapTrigger(
+            .mouseButton(.middle),
+            keyCombinationAssigned: { true },
+            startMonitor: { _ in false },
+            setKeyCombinationEnabled: { keyCombinationEnabled = $0 }
+        )
+
+        XCTAssertTrue(keyCombinationEnabled)
+        XCTAssertEqual(activeTrigger, .keyCombination)
+        XCTAssertEqual(manager.activeRecordingTrigger, .keyCombination)
+    }
+
+    func testMouseStartupRacePublishesUnavailableWithoutAssignedFallback() {
+        let manager = ShortcutManager(registerShortcuts: false)
+        var keyCombinationEnabled = false
+
+        let activeTrigger = manager.activateEventTapTrigger(
+            .mouseButton(.middle),
+            keyCombinationAssigned: { false },
+            startMonitor: { _ in false },
+            setKeyCombinationEnabled: { keyCombinationEnabled = $0 }
+        )
+
+        XCTAssertTrue(keyCombinationEnabled)
+        XCTAssertEqual(activeTrigger, .unavailable)
+        XCTAssertEqual(manager.activeRecordingTrigger, .unavailable)
+    }
+
+    func testNoticeChecksBeforeReportingInitialInputMonitoringState() {
+        let states: [InputMonitoringPermissionState] = [
+            .notDetermined,
+            .denied,
+            .restartRequired,
+            .granted
+        ]
+
+        for state in states {
+            XCTAssertEqual(
+                InputMonitoringPermissionNotice.presentation(
+                    hasCompletedInitialCheck: false,
+                    permissionState: state
+                ),
+                .checking
+            )
+            XCTAssertEqual(
+                InputMonitoringPermissionNotice.presentation(
+                    hasCompletedInitialCheck: true,
+                    permissionState: state
+                ),
+                .resolved(state)
+            )
+        }
+    }
+
+    func testPermissionDrivenTriggerReplacementCancelsPendingHoldBeforeTeardown() async {
+        var stopCount = 0
+        let manager = ShortcutManager(
+            registerShortcuts: false,
+            holdToRecordEnabled: { true },
+            stopHoldRecording: { stopCount += 1 }
+        )
+        var teardownCount = 0
+        let initialSnapshot = TriggerPermissionSnapshot(
+            accessibilityGranted: false,
+            inputMonitoringState: .notDetermined
+        )
+        let permissions = CurrentValueSubject<TriggerPermissionSnapshot, Never>(initialSnapshot)
+        manager.observeTriggerPermissions(
+            permissions.eraseToAnyPublisher(),
+            initialSnapshot: initialSnapshot
+        ) { [weak manager] _ in
+            manager?.prepareForTriggerReplacement {
+                teardownCount += 1
+            }
+        }
+        teardownCount = 0
+
+        manager.scheduleHoldActivation(after: 0.01)
+        permissions.send(
+            TriggerPermissionSnapshot(
+                accessibilityGranted: false,
+                inputMonitoringState: .granted
+            )
+        )
+        try? await Task.sleep(nanoseconds: 50_000_000)
+
+        XCTAssertEqual(teardownCount, 1)
+        XCTAssertEqual(stopCount, 0)
+        XCTAssertFalse(manager.holdMode)
+    }
+
+    func testModifierQueuedDownIsInvalidatedByTriggerReplacement() async throws {
+        let manager = ShortcutManager(registerShortcuts: false)
+        let monitor = ModifierKeyMonitor(modifierKey: .rightOption)
+        var downCount = 0
+        monitor.onKeyDown = { downCount += 1 }
+        let event = try XCTUnwrap(
+            CGEvent(
+                keyboardEventSource: nil,
+                virtualKey: ModifierKey.rightOption.keyCode,
+                keyDown: true
+            )
+        )
+        event.flags = ModifierKey.rightOption.physicalEventFlag
+
+        monitor.handleFlagsChanged(event: event)
+        manager.prepareForTriggerReplacement {
+            monitor.stop()
+        }
+        await drainMainQueue()
+
+        XCTAssertEqual(downCount, 0)
+    }
+
+    func testMouseQueuedDownIsInvalidatedByTriggerReplacement() async throws {
+        let manager = ShortcutManager(registerShortcuts: false)
+        let monitor = MouseButtonMonitor(mouseButton: .middle)
+        var downCount = 0
+        monitor.onButtonDown = { downCount += 1 }
+        let event = try XCTUnwrap(
+            CGEvent(
+                mouseEventSource: nil,
+                mouseType: .otherMouseDown,
+                mouseCursorPosition: .zero,
+                mouseButton: .center
+            )
+        )
+        event.setIntegerValueField(.mouseEventButtonNumber, value: MouseButton.middle.buttonNumber)
+
+        XCTAssertTrue(monitor.handleMouseEvent(type: .otherMouseDown, event: event))
+        manager.prepareForTriggerReplacement {
+            monitor.stop()
+        }
+        await drainMainQueue()
+
+        XCTAssertEqual(downCount, 0)
+    }
+
+    func testModifierRuntimeReenableFailurePublishesAssignedFallback() async {
+        var stopCount = 0
+        var transitionEvents: [String] = []
+        let manager = ShortcutManager(
+            registerShortcuts: false,
+            holdToRecordEnabled: { true },
+            stopHoldRecording: {
+                stopCount += 1
+                transitionEvents.append("release")
+            }
+        )
+        let monitor = ModifierKeyMonitor()
+        var keyCombinationEnabled = true
+        let fallbackPublished = expectation(description: "modifier fallback published")
+
+        let activeTrigger = manager.activateEventTapTrigger(
+            .modifier(.rightOption),
+            keyCombinationAssigned: { true },
+            startMonitor: { failure in
+                monitor.onFailure = {
+                    failure()
+                    fallbackPublished.fulfill()
+                }
+                return true
+            },
+            setKeyCombinationEnabled: {
+                keyCombinationEnabled = $0
+                if $0 {
+                    transitionEvents.append("fallback")
+                }
+            }
+        )
+
+        XCTAssertEqual(activeTrigger, .modifier(.rightOption))
+        XCTAssertFalse(keyCombinationEnabled)
+        manager.scheduleHoldActivation(after: 0)
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertTrue(manager.holdMode)
+        monitor.handleTapDisabled(reenable: { false })
+        await fulfillment(of: [fallbackPublished], timeout: 1)
+        XCTAssertEqual(stopCount, 1)
+        XCTAssertEqual(transitionEvents, ["release", "fallback"])
+        XCTAssertFalse(manager.holdMode)
+        XCTAssertNil(monitor.onFailure)
+        XCTAssertTrue(keyCombinationEnabled)
+        XCTAssertEqual(manager.activeRecordingTrigger, .keyCombination)
+    }
+
+    func testMouseRuntimeReenableFailurePublishesUnavailableWithoutFallback() async {
+        let manager = ShortcutManager(registerShortcuts: false)
+        let monitor = MouseButtonMonitor()
+        var keyCombinationEnabled = true
+        let fallbackPublished = expectation(description: "mouse fallback published")
+
+        let activeTrigger = manager.activateEventTapTrigger(
+            .mouseButton(.middle),
+            keyCombinationAssigned: { false },
+            startMonitor: { failure in
+                monitor.onFailure = {
+                    failure()
+                    fallbackPublished.fulfill()
+                }
+                return true
+            },
+            setKeyCombinationEnabled: { keyCombinationEnabled = $0 }
+        )
+
+        XCTAssertEqual(activeTrigger, .mouseButton(.middle))
+        XCTAssertFalse(keyCombinationEnabled)
+        monitor.handleTapDisabled(reenable: { false })
+        await fulfillment(of: [fallbackPublished], timeout: 1)
+        XCTAssertTrue(keyCombinationEnabled)
+        XCTAssertEqual(manager.activeRecordingTrigger, .unavailable)
+    }
+
+    func testInitialInputMonitoringGrantActivatesModifierOnceAndTracksRevocation() {
+        let initialSnapshot = TriggerPermissionSnapshot(
+            accessibilityGranted: false,
+            inputMonitoringState: .granted
+        )
+        let permissions = CurrentValueSubject<TriggerPermissionSnapshot, Never>(initialSnapshot)
+        let manager = ShortcutManager(registerShortcuts: false)
+        var activeTriggers: [RecordingTrigger] = []
+        manager.observeTriggerPermissions(
+            permissions.eraseToAnyPublisher(),
+            initialSnapshot: initialSnapshot
+        ) { snapshot in
+            activeTriggers.append(
+                ShortcutManager.resolveRecordingTrigger(
+                    modifierKey: .rightOption,
+                    mouseButton: .none,
+                    accessibilityGranted: snapshot.accessibilityGranted,
+                    inputMonitoringState: snapshot.inputMonitoringState,
+                    keyCombinationAssigned: true
+                )
+            )
+        }
+
+        XCTAssertEqual(activeTriggers, [.modifier(.rightOption)])
+        permissions.send(initialSnapshot)
+        XCTAssertEqual(activeTriggers, [.modifier(.rightOption)])
+        permissions.send(
+            TriggerPermissionSnapshot(
+                accessibilityGranted: false,
+                inputMonitoringState: .denied
+            )
+        )
+        XCTAssertEqual(activeTriggers, [.modifier(.rightOption), .keyCombination])
+    }
+
+    func testInitialAccessibilityGrantActivatesMouseOnceAndTracksRevocation() {
+        let initialSnapshot = TriggerPermissionSnapshot(
+            accessibilityGranted: true,
+            inputMonitoringState: .denied
+        )
+        let permissions = CurrentValueSubject<TriggerPermissionSnapshot, Never>(initialSnapshot)
+        let manager = ShortcutManager(registerShortcuts: false)
+        var activeTriggers: [RecordingTrigger] = []
+        manager.observeTriggerPermissions(
+            permissions.eraseToAnyPublisher(),
+            initialSnapshot: initialSnapshot
+        ) { snapshot in
+            activeTriggers.append(
+                ShortcutManager.resolveRecordingTrigger(
+                    modifierKey: .none,
+                    mouseButton: .middle,
+                    accessibilityGranted: snapshot.accessibilityGranted,
+                    inputMonitoringState: snapshot.inputMonitoringState,
+                    keyCombinationAssigned: true
+                )
+            )
+        }
+
+        XCTAssertEqual(activeTriggers, [.mouseButton(.middle)])
+        permissions.send(initialSnapshot)
+        XCTAssertEqual(activeTriggers, [.mouseButton(.middle)])
+        permissions.send(
+            TriggerPermissionSnapshot(
+                accessibilityGranted: false,
+                inputMonitoringState: .denied
+            )
+        )
+        XCTAssertEqual(activeTriggers, [.mouseButton(.middle), .keyCombination])
+    }
+
+    private func makeManager(_ system: MockPermissionSystem) -> PermissionsManager {
+        PermissionsManager(
+            client: system.makeClient(),
+            monitorSystemChanges: false,
+            checkQueue: DispatchQueue(label: "test.permissions.\(UUID().uuidString)")
+        )
+    }
+
+    private func refresh(_ manager: PermissionsManager) async {
+        let checked = expectation(description: "permissions checked")
+        let cancellable = manager.$hasCompletedInitialCheck
+            .filter { $0 }
+            .sink { _ in checked.fulfill() }
+        manager.checkAllPermissions()
+        await fulfillment(of: [checked], timeout: 1)
+        withExtendedLifetime(cancellable) {}
+    }
+
+    private func requestInputMonitoring(
+        _ manager: PermissionsManager,
+        expecting state: InputMonitoringPermissionState
+    ) async {
+        let changed = expectation(description: "input monitoring state changed")
+        let cancellable = manager.$inputMonitoringPermissionState
+            .dropFirst()
+            .filter { $0 == state }
+            .sink { _ in changed.fulfill() }
+        manager.requestInputMonitoringPermissionIfNeeded()
+        await fulfillment(of: [changed], timeout: 1)
+        withExtendedLifetime(cancellable) {}
+    }
+
+    private func drainMainQueue() async {
+        let drained = expectation(description: "main queue drained")
+        DispatchQueue.main.async {
+            drained.fulfill()
+        }
+        await fulfillment(of: [drained], timeout: 1)
     }
 }
