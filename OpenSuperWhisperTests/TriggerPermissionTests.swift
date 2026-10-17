@@ -212,10 +212,50 @@ final class TriggerPermissionTests: XCTestCase {
         let manager = ShortcutManager(registerShortcuts: false)
         var keyCombinationEnabled = false
 
-        let activeTrigger = manager.activateModifierTrigger(
-            .rightOption,
+        let activeTrigger = manager.activateEventTapTrigger(
+            .modifier(.rightOption),
             keyCombinationAssigned: true,
-            startMonitor: { _ in false },
+            startMonitor: { false },
+            setKeyCombinationEnabled: { keyCombinationEnabled = $0 }
+        )
+
+        XCTAssertTrue(keyCombinationEnabled)
+        XCTAssertEqual(activeTrigger, .keyCombination)
+        XCTAssertEqual(manager.activeRecordingTrigger, .keyCombination)
+        XCTAssertEqual(
+            InputMonitoringPermissionNotice.activationDescription(for: activeTrigger),
+            "The regular key combination is active instead."
+        )
+    }
+
+    func testModifierStartupRacePublishesUnavailableWithoutAssignedFallback() {
+        let manager = ShortcutManager(registerShortcuts: false)
+        var keyCombinationEnabled = false
+
+        let activeTrigger = manager.activateEventTapTrigger(
+            .modifier(.rightOption),
+            keyCombinationAssigned: false,
+            startMonitor: { false },
+            setKeyCombinationEnabled: { keyCombinationEnabled = $0 }
+        )
+
+        XCTAssertTrue(keyCombinationEnabled)
+        XCTAssertEqual(activeTrigger, .unavailable)
+        XCTAssertEqual(manager.activeRecordingTrigger, .unavailable)
+        XCTAssertEqual(
+            InputMonitoringPermissionNotice.activationDescription(for: activeTrigger),
+            "No global trigger is active. Configure a key combination in Shortcuts."
+        )
+    }
+
+    func testMouseStartupRacePublishesAssignedFallback() {
+        let manager = ShortcutManager(registerShortcuts: false)
+        var keyCombinationEnabled = false
+
+        let activeTrigger = manager.activateEventTapTrigger(
+            .mouseButton(.middle),
+            keyCombinationAssigned: true,
+            startMonitor: { false },
             setKeyCombinationEnabled: { keyCombinationEnabled = $0 }
         )
 
@@ -224,14 +264,14 @@ final class TriggerPermissionTests: XCTestCase {
         XCTAssertEqual(manager.activeRecordingTrigger, .keyCombination)
     }
 
-    func testModifierStartupRacePublishesUnavailableWithoutAssignedFallback() {
+    func testMouseStartupRacePublishesUnavailableWithoutAssignedFallback() {
         let manager = ShortcutManager(registerShortcuts: false)
         var keyCombinationEnabled = false
 
-        let activeTrigger = manager.activateModifierTrigger(
-            .rightOption,
+        let activeTrigger = manager.activateEventTapTrigger(
+            .mouseButton(.middle),
             keyCombinationAssigned: false,
-            startMonitor: { _ in false },
+            startMonitor: { false },
             setKeyCombinationEnabled: { keyCombinationEnabled = $0 }
         )
 

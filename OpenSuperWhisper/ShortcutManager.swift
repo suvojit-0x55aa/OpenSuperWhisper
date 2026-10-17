@@ -116,8 +116,6 @@ class ShortcutManager: ObservableObject {
 
         switch trigger {
         case .mouseButton(let button):
-            KeyboardShortcuts.disable(.toggleRecord)
-
             MouseButtonMonitor.shared.onButtonDown = { [weak self] in
                 self?.handleKeyDown()
             }
@@ -126,9 +124,19 @@ class ShortcutManager: ObservableObject {
                 self?.handleKeyUp()
             }
 
-            MouseButtonMonitor.shared.start(mouseButton: button)
-            activeRecordingTrigger = .mouseButton(button)
-            print("ShortcutManager: Using mouse-button hotkey: \(button.displayName)")
+            let activeTrigger = activateEventTapTrigger(
+                .mouseButton(button),
+                keyCombinationAssigned: keyCombinationAssigned,
+                startMonitor: { MouseButtonMonitor.shared.start(mouseButton: button) },
+                setKeyCombinationEnabled: Self.setKeyCombinationEnabled
+            )
+            if activeTrigger == .mouseButton(button) {
+                print("ShortcutManager: Using mouse-button hotkey: \(button.displayName)")
+            } else if activeTrigger == .keyCombination {
+                print("ShortcutManager: Mouse monitor unavailable; using regular shortcut fallback")
+            } else {
+                print("ShortcutManager: Mouse monitor unavailable; no global recording trigger is assigned")
+            }
         case .modifier(let modifier):
             ModifierKeyMonitor.shared.onKeyDown = { [weak self] in
                 self?.handleKeyDown()
@@ -138,17 +146,11 @@ class ShortcutManager: ObservableObject {
                 self?.handleKeyUp()
             }
 
-            let activeTrigger = activateModifierTrigger(
-                modifier,
+            let activeTrigger = activateEventTapTrigger(
+                .modifier(modifier),
                 keyCombinationAssigned: keyCombinationAssigned,
-                startMonitor: { ModifierKeyMonitor.shared.start(modifierKey: $0) },
-                setKeyCombinationEnabled: { enabled in
-                    if enabled {
-                        KeyboardShortcuts.enable(.toggleRecord)
-                    } else {
-                        KeyboardShortcuts.disable(.toggleRecord)
-                    }
-                }
+                startMonitor: { ModifierKeyMonitor.shared.start(modifierKey: modifier) },
+                setKeyCombinationEnabled: Self.setKeyCombinationEnabled
             )
             if activeTrigger == .modifier(modifier) {
                 print("ShortcutManager: Using modifier-only hotkey: \(modifier.displayName)")
@@ -169,22 +171,30 @@ class ShortcutManager: ObservableObject {
     }
 
     @discardableResult
-    func activateModifierTrigger(
-        _ modifier: ModifierKey,
+    func activateEventTapTrigger(
+        _ requestedTrigger: RecordingTrigger,
         keyCombinationAssigned: Bool,
-        startMonitor: (ModifierKey) -> Bool,
+        startMonitor: () -> Bool,
         setKeyCombinationEnabled: (Bool) -> Void
     ) -> RecordingTrigger {
         let trigger: RecordingTrigger
-        if startMonitor(modifier) {
+        if startMonitor() {
             setKeyCombinationEnabled(false)
-            trigger = .modifier(modifier)
+            trigger = requestedTrigger
         } else {
             setKeyCombinationEnabled(true)
             trigger = keyCombinationAssigned ? .keyCombination : .unavailable
         }
         activeRecordingTrigger = trigger
         return trigger
+    }
+
+    private static func setKeyCombinationEnabled(_ enabled: Bool) {
+        if enabled {
+            KeyboardShortcuts.enable(.toggleRecord)
+        } else {
+            KeyboardShortcuts.disable(.toggleRecord)
+        }
     }
 
     static func resolveRecordingTrigger(

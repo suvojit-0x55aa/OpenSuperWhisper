@@ -2,6 +2,7 @@ import SwiftUI
 
 struct InputMonitoringPermissionNotice: View {
     @ObservedObject var permissionsManager: PermissionsManager
+    @ObservedObject private var shortcutManager = ShortcutManager.shared
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -9,12 +10,14 @@ struct InputMonitoringPermissionNotice: View {
             case .granted:
                 Label("Input Monitoring granted", systemImage: "checkmark.circle.fill")
                     .foregroundColor(.green)
-                Text("The single modifier key trigger is active.")
+                Text(Self.activationDescription(for: shortcutManager.activeRecordingTrigger))
                     .foregroundColor(.secondary)
             case .notDetermined:
                 Label("Input Monitoring not granted yet", systemImage: "exclamationmark.triangle.fill")
                     .foregroundColor(.orange)
-                Text("macOS requires it only for the single modifier key trigger. The regular key combination and in-app recording remain available.")
+                Text("macOS requires it only for the single modifier key trigger. In-app recording remains available.")
+                    .foregroundColor(.secondary)
+                Text(Self.activationDescription(for: shortcutManager.activeRecordingTrigger))
                     .foregroundColor(.secondary)
                 Button("Grant Input Monitoring") {
                     permissionsManager.requestInputMonitoringPermissionOrOpenSystemPreferences()
@@ -24,7 +27,9 @@ struct InputMonitoringPermissionNotice: View {
             case .denied:
                 Label("Input Monitoring not granted", systemImage: "xmark.circle.fill")
                     .foregroundColor(.orange)
-                Text("The single modifier key trigger is inactive. Use the regular key combination, or allow OpenSuperWhisper in Privacy & Security → Input Monitoring.")
+                Text("The single modifier key trigger is inactive. Allow OpenSuperWhisper in Privacy & Security → Input Monitoring to enable it.")
+                    .foregroundColor(.secondary)
+                Text(Self.activationDescription(for: shortcutManager.activeRecordingTrigger))
                     .foregroundColor(.secondary)
                 settingsButton
             case .restartRequired:
@@ -32,11 +37,26 @@ struct InputMonitoringPermissionNotice: View {
                     .foregroundColor(.orange)
                 Text("Input Monitoring is enabled in System Settings. Quit and reopen OpenSuperWhisper to activate the single modifier key trigger.")
                     .foregroundColor(.secondary)
+                Text(Self.activationDescription(for: shortcutManager.activeRecordingTrigger))
+                    .foregroundColor(.secondary)
                 settingsButton
             }
         }
         .font(.caption)
         .padding(.top, 4)
+    }
+
+    static func activationDescription(for trigger: RecordingTrigger) -> String {
+        switch trigger {
+        case .modifier:
+            return "The single modifier key trigger is active."
+        case .keyCombination:
+            return "The regular key combination is active instead."
+        case .mouseButton:
+            return "The mouse-button trigger is active instead."
+        case .unavailable:
+            return "No global trigger is active. Configure a key combination in Shortcuts."
+        }
     }
 
     private var settingsButton: some View {

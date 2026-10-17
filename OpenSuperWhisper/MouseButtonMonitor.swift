@@ -59,10 +59,11 @@ class MouseButtonMonitor {
 
     private init() {}
 
-    func start(mouseButton: MouseButton) {
+    @discardableResult
+    func start(mouseButton: MouseButton) -> Bool {
         guard mouseButton != .none else {
             stop()
-            return
+            return false
         }
 
         stop()
@@ -104,17 +105,28 @@ class MouseButtonMonitor {
             userInfo: Unmanaged.passUnretained(self).toOpaque()
         ) else {
             print("MouseButtonMonitor: Failed to create event tap. Check accessibility permissions.")
-            return
+            return false
         }
 
         eventTap = tap
         runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
 
-        if let source = runLoopSource {
-            CFRunLoopAddSource(CFRunLoopGetCurrent(), source, .commonModes)
-            CGEvent.tapEnable(tap: tap, enable: true)
-            print("MouseButtonMonitor: Started monitoring for \(mouseButton.displayName)")
+        guard let source = runLoopSource else {
+            stop()
+            print("MouseButtonMonitor: Failed to create event tap run loop source.")
+            return false
         }
+
+        CFRunLoopAddSource(CFRunLoopGetCurrent(), source, .commonModes)
+        CGEvent.tapEnable(tap: tap, enable: true)
+        guard CGEvent.tapIsEnabled(tap: tap) else {
+            stop()
+            print("MouseButtonMonitor: Event tap could not be enabled.")
+            return false
+        }
+
+        print("MouseButtonMonitor: Started monitoring for \(mouseButton.displayName)")
+        return true
     }
 
     func stop() {
