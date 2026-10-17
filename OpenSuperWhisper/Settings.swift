@@ -1455,7 +1455,12 @@ struct SettingsView: View {
                                     Text("Shortcut")
                                         .font(.subheadline)
                                     Spacer()
-                                    KeyboardShortcuts.Recorder("", name: .toggleRecord)
+                                    KeyboardShortcuts.Recorder("", name: .toggleRecord) { _ in
+                                        NotificationCenter.default.post(
+                                            name: .hotkeySettingsChanged,
+                                            object: nil
+                                        )
+                                    }
                                         .frame(width: 150)
                                 }
                                 .padding(.horizontal, 12)

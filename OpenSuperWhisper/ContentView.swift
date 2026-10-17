@@ -310,6 +310,7 @@ struct ContentView: View {
     @ObservedObject private var errors = AppErrorCenter.shared
     @StateObject private var viewModel = ContentViewModel()
     @ObservedObject private var permissionsManager = PermissionsManager.shared
+    @ObservedObject private var shortcutManager = ShortcutManager.shared
     @Environment(\.colorScheme) private var colorScheme
     @State private var isSettingsPresented = false
     @State private var searchText = ""
@@ -318,15 +319,7 @@ struct ContentView: View {
     @State private var searchTask: Task<Void, Never>? = nil
 
     private var currentRecordingTrigger: RecordingTrigger {
-        let mouseButton = MouseButton(rawValue: AppPreferences.shared.mouseButtonHotkey) ?? .none
-        let modifierKey = ModifierKey(rawValue: AppPreferences.shared.modifierOnlyHotkey) ?? .none
-        return ShortcutManager.resolveRecordingTrigger(
-            modifierKey: modifierKey,
-            mouseButton: mouseButton,
-            accessibilityGranted: permissionsManager.isAccessibilityPermissionGranted,
-            inputMonitoringState: permissionsManager.inputMonitoringPermissionState,
-            keyCombinationAssigned: KeyboardShortcuts.getShortcut(for: .toggleRecord) != nil
-        )
+        shortcutManager.activeRecordingTrigger
     }
 
     private var currentShortcutDescription: String? {

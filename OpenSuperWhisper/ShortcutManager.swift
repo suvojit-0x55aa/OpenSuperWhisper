@@ -20,9 +20,10 @@ enum RecordingTrigger: Equatable {
 }
 
 @MainActor
-class ShortcutManager {
+class ShortcutManager: ObservableObject {
     static let shared = ShortcutManager()
 
+    @Published private(set) var activeRecordingTrigger: RecordingTrigger = .unavailable
     private var triggerPermissions: PermissionsManager?
     private var permissionSubscription: AnyCancellable?
     private var activeVm: IndicatorViewModel?
@@ -101,12 +102,13 @@ class ShortcutManager {
         let modifierKey = ModifierKey(rawValue: AppPreferences.shared.modifierOnlyHotkey) ?? .none
         let mouseButton = MouseButton(rawValue: AppPreferences.shared.mouseButtonHotkey) ?? .none
         let permissions = triggerPermissions ?? PermissionsManager.shared
+        let keyCombinationAssigned = KeyboardShortcuts.getShortcut(for: .toggleRecord) != nil
         let trigger = Self.resolveRecordingTrigger(
             modifierKey: modifierKey,
             mouseButton: mouseButton,
             accessibilityGranted: permissions.isAccessibilityPermissionGranted,
             inputMonitoringState: permissions.inputMonitoringPermissionState,
-            keyCombinationAssigned: KeyboardShortcuts.getShortcut(for: .toggleRecord) != nil
+            keyCombinationAssigned: keyCombinationAssigned
         )
 
         ModifierKeyMonitor.shared.stop()
@@ -125,10 +127,9 @@ class ShortcutManager {
             }
 
             MouseButtonMonitor.shared.start(mouseButton: button)
+            activeRecordingTrigger = .mouseButton(button)
             print("ShortcutManager: Using mouse-button hotkey: \(button.displayName)")
         case .modifier(let modifier):
-            KeyboardShortcuts.disable(.toggleRecord)
-
             ModifierKeyMonitor.shared.onKeyDown = { [weak self] in
                 self?.handleKeyDown()
             }
@@ -137,15 +138,53 @@ class ShortcutManager {
                 self?.handleKeyUp()
             }
 
-            ModifierKeyMonitor.shared.start(modifierKey: modifier)
-            print("ShortcutManager: Using modifier-only hotkey: \(modifier.displayName)")
+            let activeTrigger = activateModifierTrigger(
+                modifier,
+                keyCombinationAssigned: keyCombinationAssigned,
+                startMonitor: { ModifierKeyMonitor.shared.start(modifierKey: $0) },
+                setKeyCombinationEnabled: { enabled in
+                    if enabled {
+                        KeyboardShortcuts.enable(.toggleRecord)
+                    } else {
+                        KeyboardShortcuts.disable(.toggleRecord)
+                    }
+                }
+            )
+            if activeTrigger == .modifier(modifier) {
+                print("ShortcutManager: Using modifier-only hotkey: \(modifier.displayName)")
+            } else if activeTrigger == .keyCombination {
+                print("ShortcutManager: Modifier monitor unavailable; using regular shortcut fallback")
+            } else {
+                print("ShortcutManager: Modifier monitor unavailable; no global recording trigger is assigned")
+            }
         case .keyCombination:
             KeyboardShortcuts.enable(.toggleRecord)
+            activeRecordingTrigger = .keyCombination
             print("ShortcutManager: Using regular keyboard shortcut")
         case .unavailable:
             KeyboardShortcuts.enable(.toggleRecord)
+            activeRecordingTrigger = .unavailable
             print("ShortcutManager: No global recording trigger is available")
         }
+    }
+
+    @discardableResult
+    func activateModifierTrigger(
+        _ modifier: ModifierKey,
+        keyCombinationAssigned: Bool,
+        startMonitor: (ModifierKey) -> Bool,
+        setKeyCombinationEnabled: (Bool) -> Void
+    ) -> RecordingTrigger {
+        let trigger: RecordingTrigger
+        if startMonitor(modifier) {
+            setKeyCombinationEnabled(false)
+            trigger = .modifier(modifier)
+        } else {
+            setKeyCombinationEnabled(true)
+            trigger = keyCombinationAssigned ? .keyCombination : .unavailable
+        }
+        activeRecordingTrigger = trigger
+        return trigger
     }
 
     static func resolveRecordingTrigger(

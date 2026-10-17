@@ -123,10 +123,11 @@ class ModifierKeyMonitor {
     
     init(modifierKey: ModifierKey = .none) { selectedModifierKey = modifierKey }
     
-    func start(modifierKey: ModifierKey) {
+    @discardableResult
+    func start(modifierKey: ModifierKey) -> Bool {
         guard modifierKey != .none else {
             stop()
-            return
+            return false
         }
         
         stop()
@@ -159,17 +160,28 @@ class ModifierKeyMonitor {
             userInfo: Unmanaged.passUnretained(self).toOpaque()
         ) else {
             print("ModifierKeyMonitor: Failed to create event tap. Check Input Monitoring permission.")
-            return
+            return false
         }
         
         eventTap = tap
         runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
-        
-        if let source = runLoopSource {
-            CFRunLoopAddSource(CFRunLoopGetCurrent(), source, .commonModes)
-            CGEvent.tapEnable(tap: tap, enable: true)
-            print("ModifierKeyMonitor: Started monitoring for \(modifierKey.displayName)")
+
+        guard let source = runLoopSource else {
+            stop()
+            print("ModifierKeyMonitor: Failed to create event tap run loop source.")
+            return false
         }
+
+        CFRunLoopAddSource(CFRunLoopGetCurrent(), source, .commonModes)
+        CGEvent.tapEnable(tap: tap, enable: true)
+        guard CGEvent.tapIsEnabled(tap: tap) else {
+            stop()
+            print("ModifierKeyMonitor: Event tap could not be enabled.")
+            return false
+        }
+
+        print("ModifierKeyMonitor: Started monitoring for \(modifierKey.displayName)")
+        return true
     }
     
     func stop() {

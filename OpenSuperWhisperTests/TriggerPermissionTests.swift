@@ -208,6 +208,38 @@ final class TriggerPermissionTests: XCTestCase {
         )
     }
 
+    func testModifierStartupRacePublishesAssignedFallback() {
+        let manager = ShortcutManager(registerShortcuts: false)
+        var keyCombinationEnabled = false
+
+        let activeTrigger = manager.activateModifierTrigger(
+            .rightOption,
+            keyCombinationAssigned: true,
+            startMonitor: { _ in false },
+            setKeyCombinationEnabled: { keyCombinationEnabled = $0 }
+        )
+
+        XCTAssertTrue(keyCombinationEnabled)
+        XCTAssertEqual(activeTrigger, .keyCombination)
+        XCTAssertEqual(manager.activeRecordingTrigger, .keyCombination)
+    }
+
+    func testModifierStartupRacePublishesUnavailableWithoutAssignedFallback() {
+        let manager = ShortcutManager(registerShortcuts: false)
+        var keyCombinationEnabled = false
+
+        let activeTrigger = manager.activateModifierTrigger(
+            .rightOption,
+            keyCombinationAssigned: false,
+            startMonitor: { _ in false },
+            setKeyCombinationEnabled: { keyCombinationEnabled = $0 }
+        )
+
+        XCTAssertTrue(keyCombinationEnabled)
+        XCTAssertEqual(activeTrigger, .unavailable)
+        XCTAssertEqual(manager.activeRecordingTrigger, .unavailable)
+    }
+
     func testPermissionGrantAndRevocationReconfigureTriggerOnce() {
         let permissions = CurrentValueSubject<Int, Never>(0)
         let manager = ShortcutManager(registerShortcuts: false)
